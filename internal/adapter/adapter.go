@@ -48,6 +48,11 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
+	networkIsolation bool
+	rejectHostNetwork bool
+	podCIDRs          []string
+	serviceCIDRs      []string
+
 	logger *zap.SugaredLogger
 	prevCPU   map[string]int64
 	prevCPUMu sync.RWMutex
@@ -95,7 +100,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		}
 	}
 
-	return &KubernetesDockerAdapter{
+	a := &KubernetesDockerAdapter{
 		client:           client,
 		metricsClient:    mc,
 		restConfig:       restCfg,
@@ -103,11 +108,28 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		apiServerHost:    apiServerHost(restCfg.Host),
 		lowPortThreshold: opts.Config.LowPortThreshold,
 		gpuResourceName:  opts.Config.GPUResourceName,
+		networkIsolation: opts.Config.NetworkIsolation,
+		rejectHostNetwork: opts.Config.RejectHostNetwork,
+		podCIDRs:          splitCIDRs(opts.Config.PodCIDRs),
+		serviceCIDRs:      splitCIDRs(opts.Config.ServiceCIDRs),
 		logger:           opts.Logger,
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
-	}, nil
+	}
+	if a.networkIsolation {
+		if len(a.podCIDRs) == 0 || len(a.serviceCIDRs) == 0 {
+			return nil, fmt.Errorf("network isolation requires D2K_POD_CIDRS and D2K_SERVICE_CIDRS")
+		}
+		if err := a.restorePersistedNetworks(context.Background()); err != nil {
+			return nil, fmt.Errorf("unable to restore persisted Docker network state: %w", err)
+		}
+		if err := a.ensureIsolationBaseline(context.Background()); err != nil {
+			return nil, fmt.Errorf("unable to establish fail-closed Docker workload isolation: %w", err)
+		}
+		opts.Logger.Infow("Docker-network-equivalent isolation enabled", "podCIDRs", a.podCIDRs, "serviceCIDRs", a.serviceCIDRs)
+	}
+	return a, nil
 }
 
 // apiServerHost extracts the bare hostname or IP from a Kubernetes API server

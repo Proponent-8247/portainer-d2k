@@ -69,6 +69,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 	// Networks
 	mux.HandleFunc("GET /networks", n.List)
 	mux.HandleFunc("POST /networks/create", n.Create)
+	mux.HandleFunc("POST /networks/", n.DispatchPost)
 	mux.HandleFunc("GET /networks/", n.Inspect)
 	mux.HandleFunc("DELETE /networks/", n.Remove)
 

@@ -71,4 +71,8 @@ const (
 	// AnnotationEndpointMode stores the Swarm endpoint mode for a service.
 	// Values: "vip" (default) or "dnsrr" (host-port / direct node IP mode).
 	AnnotationEndpointMode = LabelPrefix + "/endpoint-mode"
+
+	LabelNetworkPrefix = LabelPrefix + "/net-"
+	AnnotationNetworkIDs = LabelPrefix + "/network-ids"
+	LabelNetworkState = LabelPrefix + "/network-state"
 )

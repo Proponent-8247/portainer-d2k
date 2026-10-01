@@ -40,9 +40,11 @@ type NetworkSummary struct {
 
 // CreateNetworkOptions mirrors docker network create flags.
 type CreateNetworkOptions struct {
-	Name   string
-	Driver string
-	Labels map[string]string
+	Name       string
+	Driver     string
+	Labels     map[string]string
+	Internal   bool
+	Attachable bool
 }
 
 // CreateNetwork accepts a docker network create call and returns a synthetic
@@ -54,7 +56,7 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 
 	var warnings []string
 
-	if opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
+	if !a.networkIsolation && opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
 		warnings = append(warnings, fmt.Sprintf(
 			"network %q created but Kubernetes namespace networking is flat - "+
 				"all containers share the same network regardless of which network they are assigned to",
@@ -76,23 +78,38 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 	}
 
 	summary := &NetworkSummary{
-		ID:     networkIDForName(opts.Name, a.namespace),
-		Name:   opts.Name,
-		Driver: "overlay",
-		Scope:  "swarm",
-		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
-		Labels: labels,
+		ID:         networkIDForName(opts.Name, a.namespace),
+		Name:       opts.Name,
+		Driver:     "overlay",
+		Scope:      "swarm",
+		Internal:   opts.Internal,
+		Attachable: opts.Attachable,
+		IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
+		Labels:     labels,
 	}
 
 	a.networksMu.Lock()
 	a.networks[opts.Name] = summary
 	a.networksMu.Unlock()
 
+	if a.networkIsolation {
+		if err := a.persistNetwork(ctx, summary); err != nil {
+			return nil, warnings, err
+		}
+		if err := a.ensureNetworkIsolationPolicy(ctx, summary); err != nil {
+			return nil, warnings, err
+		}
+	}
 	return summary, warnings, nil
 }
 
 // ListNetworks returns the synthetic network list.
 func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
+	if a.networkIsolation {
+		if err := a.restorePersistedNetworks(ctx); err != nil {
+			return nil, err
+		}
+	}
 	a.networksMu.RLock()
 	defer a.networksMu.RUnlock()
 
@@ -325,8 +342,12 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 	defer a.networksMu.Unlock()
 
 	// Try direct name match first.
-	if _, ok := a.networks[nameOrID]; ok {
+	if n, ok := a.networks[nameOrID]; ok {
 		delete(a.networks, nameOrID)
+		if a.networkIsolation {
+			_ = a.deletePersistedNetwork(ctx, n)
+			_ = a.deleteNetworkIsolationPolicy(ctx, n.ID)
+		}
 		return nil
 	}
 
@@ -335,6 +356,10 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 	for netName, net := range a.networks {
 		if net.ID == nameOrID {
 			delete(a.networks, netName)
+			if a.networkIsolation {
+				_ = a.deletePersistedNetwork(ctx, net)
+				_ = a.deleteNetworkIsolationPolicy(ctx, net.ID)
+			}
 			return nil
 		}
 	}

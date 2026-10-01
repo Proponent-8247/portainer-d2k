@@ -31,6 +31,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -274,6 +275,10 @@ type swarmServiceSpec struct {
 		Placement struct {
 			Constraints []string `json:"Constraints"` // e.g. "node.role == worker"
 		} `json:"Placement"`
+		Networks []struct {
+			Target  string   `json:"Target"`
+			Aliases []string `json:"Aliases"`
+		} `json:"Networks"`
 	} `json:"TaskTemplate"`
 
 	Mode struct {
@@ -297,6 +302,22 @@ type swarmServiceSpec struct {
 			PublishMode   string `json:"PublishMode"` // ingress | host
 		} `json:"Ports"`
 	} `json:"EndpointSpec"`
+}
+
+func swarmNetworkPolicyPorts(spec swarmServiceSpec) []networkingv1.NetworkPolicyPort {
+	var out []networkingv1.NetworkPolicyPort
+	seen := map[string]bool{}
+	for _, p := range spec.EndpointSpec.Ports {
+		if p.TargetPort <= 0 { continue }
+		proto := corev1.ProtocolTCP
+		if strings.EqualFold(p.Protocol, "udp") { proto = corev1.ProtocolUDP }
+		key := fmt.Sprintf("%s/%d", proto, p.TargetPort)
+		if seen[key] { continue }
+		seen[key] = true
+		port := intstr.FromInt(p.TargetPort)
+		out = append(out, networkingv1.NetworkPolicyPort{Protocol:&proto, Port:&port})
+	}
+	return out
 }
 
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
@@ -621,6 +642,25 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		}
 	}
 
+	var networkRefs []string
+	for _, attachment := range spec.TaskTemplate.Networks {
+		if attachment.Target != "" {
+			networkRefs = append(networkRefs, attachment.Target)
+		}
+	}
+	var networkIDs []string
+	var networkLabels map[string]string
+	if a.networkIsolation {
+		var netErr error
+		networkLabels, networkIDs, netErr = a.networkMembership(ctx, networkRefs, a.namespace)
+		if netErr != nil {
+			return nil, netErr
+		}
+		for k, v := range networkLabels {
+			baseLabels[k] = v
+		}
+	}
+
 	// --- detect dnsrr / host-port mode ---
 	// Triggered by either:
 	//   EndpointSpec.Mode == "dnsrr"
@@ -672,6 +712,9 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	}
 	if isDNSRR {
 		deploymentAnnotations[types.AnnotationEndpointMode] = "dnsrr"
+	}
+	if a.networkIsolation {
+		deploymentAnnotations[types.AnnotationNetworkIDs] = encodeNetworkIDs(networkIDs)
 	}
 
 	deployment := &appsv1.Deployment{
@@ -728,9 +771,24 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	if stack, ok := baseLabels[types.LabelSwarmStack]; ok {
 		deployment.Spec.Template.Labels[types.LabelSwarmStack] = stack
 	}
+	if a.networkIsolation {
+		for k, v := range networkLabels {
+			deployment.Spec.Template.Labels[k] = v
+		}
+		if deployment.Spec.Template.Annotations == nil {
+			deployment.Spec.Template.Annotations = map[string]string{}
+		}
+		deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = encodeNetworkIDs(networkIDs)
+		if err := a.ensurePublishedIngressPolicy(ctx, name, swarmNetworkPolicyPorts(spec)); err != nil {
+			return nil, err
+		}
+	}
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
+		if a.networkIsolation {
+			_ = a.deletePublishedIngressPolicy(ctx, name)
+		}
 		if errors.IsAlreadyExists(err) {
 			// docker stack deploy is idempotent — if the deployment already exists,
 			// update it in place rather than failing. This matches real Swarm
@@ -976,6 +1034,23 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		target.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", r)
 	}
 
+	if a.networkIsolation && spec.TaskTemplate.Networks != nil {
+		var refs []string
+		for _, attachment := range spec.TaskTemplate.Networks {
+			if attachment.Target != "" {
+				refs = append(refs, attachment.Target)
+			}
+		}
+		if err := a.applyDeploymentNetworks(ctx, target, refs, a.namespace); err != nil {
+			return err
+		}
+	}
+	if a.networkIsolation && spec.EndpointSpec.Ports != nil {
+		if err := a.ensurePublishedIngressPolicy(ctx, target.Name, swarmNetworkPolicyPorts(spec)); err != nil {
+			return err
+		}
+	}
+
 	// Don't set any update annotations - let task polling drive convergence.
 	// Kubernetes reconciles the scale immediately, so all pods will be
 	// running by the time the CLI polls tasks. The progress loop exits
@@ -1027,6 +1102,9 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			}
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
+			if a.networkIsolation {
+				_ = a.deletePublishedIngressPolicy(ctx, d.Name)
+			}
 			return nil
 		}
 	}

@@ -58,4 +58,15 @@ type Config struct {
 	// TLSPort is the port used when TLS is active.
 	// Defaults to 2376 (standard Docker TLS port).
 	TLSPort int `env:"D2K_TLS_PORT,default=2376"`
+
+	// NetworkIsolation enables Docker-network-equivalent workload isolation.
+	NetworkIsolation bool `env:"D2K_NETWORK_ISOLATION,default=false"`
+
+	// PodCIDRs and ServiceCIDRs are comma-separated cluster CIDRs excluded from
+	// world egress so unrelated Docker networks cannot bypass isolation.
+	PodCIDRs string `env:"D2K_POD_CIDRS"`
+	ServiceCIDRs string `env:"D2K_SERVICE_CIDRS"`
+
+	// RejectHostNetwork rejects Docker host-network requests while isolation is active.
+	RejectHostNetwork bool `env:"D2K_REJECT_HOST_NETWORK,default=true"`
 }

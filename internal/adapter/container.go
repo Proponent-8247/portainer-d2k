@@ -35,6 +35,7 @@ type RunOptions struct {
 	ExposedPorts map[string]struct{}
 	Volumes      []string
 	GPUCount     int
+	Networks     []string
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -76,14 +77,33 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to resolve port mappings: %w", err)
 	}
 
+	if a.networkIsolation && a.rejectHostNetwork {
+		for _, ref := range opts.Networks {
+			if ref == "host" {
+				return "", warnings, fmt.Errorf("host network mode is rejected while Docker-network isolation is enabled")
+			}
+		}
+	}
+
 	// Build and create the Deployment.
 	deployment, err := a.buildDeployment(ctx, opts, kind, mappings)
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
+	if a.networkIsolation {
+		if err := a.applyDeploymentNetworks(ctx, deployment, opts.Networks, "bridge"); err != nil {
+			return "", warnings, err
+		}
+		if err := a.ensurePublishedIngressPolicy(ctx, opts.Name, mappingsToNetworkPolicyPorts(mappings)); err != nil {
+			return "", warnings, err
+		}
+	}
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
+		if a.networkIsolation {
+			_ = a.deletePublishedIngressPolicy(ctx, opts.Name)
+		}
 		if errors.IsAlreadyExists(err) {
 			return "", nil, fmt.Errorf("container name %q is already in use", opts.Name)
 		}
@@ -226,6 +246,9 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
 	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
+	if a.networkIsolation {
+		_ = a.deletePublishedIngressPolicy(ctx, resolved)
+	}
 
 	return nil
 }
