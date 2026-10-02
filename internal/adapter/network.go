@@ -239,7 +239,7 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 				netID := networkIDForName(d.Name, a.namespace)
 				// Look up LB service IP for the subnet value.
 				subnet := "10.0.0.0/8"
-				lbSvc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(d.Name)+"-lb", metav1.GetOptions{})
+				lbSvc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName(d.Name), metav1.GetOptions{})
 				if svcErr == nil {
 					for _, ing := range lbSvc.Status.LoadBalancer.Ingress {
 						if ing.IP != "" {
@@ -366,7 +366,7 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 func (a *KubernetesDockerAdapter) serviceNetworkDetail(ctx context.Context, networkID, svcName string) (map[string]any, error) {
 	subnet := "10.0.0.0/8" // fallback if no LB IP assigned yet
 
-	lbName := serviceName(svcName) + "-lb"
+	lbName := publishedServiceName(svcName)
 	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
 	if err == nil {
 		for _, ing := range svc.Status.LoadBalancer.Ingress {
