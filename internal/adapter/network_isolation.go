@@ -98,14 +98,14 @@ func parseNetworkIDs(raw string) ([]string, error) {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
+		if id == "" {
+			return nil, fmt.Errorf("network membership annotation contains an empty network ID")
+		}
+		if seen[id] {
 			continue
 		}
 		seen[id] = true
 		out = append(out, id)
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("network membership annotation contains no networks")
 	}
 	sort.Strings(out)
 	return out, nil
@@ -130,7 +130,11 @@ func (a *KubernetesDockerAdapter) reconcileIsolationState(ctx context.Context) e
 	if err := a.validateAndReconcileManagedWorkloads(ctx); err != nil {
 		return err
 	}
-	return a.ensureIsolationBaseline(ctx)
+	if err := a.ensureIsolationBaseline(ctx); err != nil {
+		return err
+	}
+	a.isolationReady = true
+	return nil
 }
 
 func (a *KubernetesDockerAdapter) validateAndReconcileManagedWorkloads(ctx context.Context) error {
@@ -153,7 +157,9 @@ func (a *KubernetesDockerAdapter) validateAndReconcileManagedWorkloads(ctx conte
 			)
 		}
 
+		expectedLabels := map[string]bool{}
 		for _, id := range ids {
+			expectedLabels[networkLabelKey(id)] = true
 			network, ok := a.lookupNetwork(id)
 			if !ok {
 				return fmt.Errorf(
@@ -176,6 +182,17 @@ func (a *KubernetesDockerAdapter) validateAndReconcileManagedWorkloads(ctx conte
 
 			if err := a.ensureNetworkIsolationPolicy(ctx, network); err != nil {
 				return fmt.Errorf("unable to reconcile policy for Docker network %q: %w", network.Name, err)
+			}
+		}
+
+		for key := range deployment.Labels {
+			if strings.HasPrefix(key, types.LabelNetworkPrefix) && !expectedLabels[key] {
+				return fmt.Errorf("existing d2k workload %q has stale Deployment network label %q", deployment.Name, key)
+			}
+		}
+		for key := range deployment.Spec.Template.Labels {
+			if strings.HasPrefix(key, types.LabelNetworkPrefix) && !expectedLabels[key] {
+				return fmt.Errorf("existing d2k workload %q has stale Pod-template network label %q", deployment.Name, key)
 			}
 		}
 	}
@@ -325,6 +342,11 @@ func (a *KubernetesDockerAdapter) restorePersistedNetworks(ctx context.Context) 
 	for _, network := range restored {
 		if err := a.ensureNetworkIsolationPolicy(ctx, network); err != nil {
 			return fmt.Errorf("unable to reconcile policy for persisted Docker network %q: %w", network.Name, err)
+		}
+	}
+	if a.isolationReady {
+		if err := a.ensureIsolationBaseline(ctx); err != nil {
+			return fmt.Errorf("unable to reconcile d2k workload default-deny policy: %w", err)
 		}
 	}
 	return nil

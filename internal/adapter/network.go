@@ -274,7 +274,10 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 
 // InspectNetwork returns a synthetic network by name or ID.
 func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID string) (*NetworkSummary, error) {
-	networks, _ := a.ListNetworks(ctx)
+	networks, err := a.ListNetworks(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, n := range networks {
 		if n.Name == nameOrID || n.ID == nameOrID {
 			return &n, nil
@@ -428,11 +431,14 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 			return fmt.Errorf("network %q has active endpoints (%s); disconnect or remove those workloads first", network.Name, strings.Join(users, ", "))
 		}
 
-		if err := a.deletePersistedNetwork(ctx, network); err != nil {
-			return fmt.Errorf("unable to delete persisted state for network %q: %w", network.Name, err)
-		}
+		// Delete the derived policy first. If deleting persistent source state
+		// fails afterward, a later restore can safely recreate the policy.
 		if err := a.deleteNetworkIsolationPolicy(ctx, network.ID); err != nil {
 			return fmt.Errorf("unable to delete isolation policy for network %q: %w", network.Name, err)
+		}
+		if err := a.deletePersistedNetwork(ctx, network); err != nil {
+			_ = a.ensureNetworkIsolationPolicy(ctx, network)
+			return fmt.Errorf("unable to delete persisted state for network %q: %w", network.Name, err)
 		}
 	}
 

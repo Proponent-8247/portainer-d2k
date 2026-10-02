@@ -52,6 +52,7 @@ type KubernetesDockerAdapter struct {
 	rejectHostNetwork bool
 	podCIDRs          []string
 	serviceCIDRs      []string
+	isolationReady    bool
 
 	logger     *zap.SugaredLogger
 	prevCPU    map[string]int64
