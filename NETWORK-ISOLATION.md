@@ -167,3 +167,10 @@ Docker's embedded DNS scopes aliases to Docker networks, while Kubernetes Servic
 Bare DNS-name collisions therefore fail closed: if a standalone container or newly created Swarm service would reuse an existing Kubernetes DNS Service name, d2k rolls the new workload back and returns an explicit error. It never treats an unrelated existing Service as the new workload's DNS identity.
 
 Network isolation itself remains correct; fully network-scoped duplicate aliases would require a dedicated Docker-compatible DNS layer rather than another CNI.
+
+
+## Selector ownership hardening
+
+Network and published-port policies select both the deterministic network/workload label and `d2k.portainer.io/managed-by=d2k`. Kubernetes Services likewise select both the workload's `app` identity and the d2k ownership label. An unrelated Pod that happens to reuse an `app` label is therefore not pulled into a d2k Service or external ingress policy.
+
+Re-deploying an already-existing Swarm service follows the same reconciliation ordering as an explicit service update: security-reducing network membership is removed from live Pods first, the Deployment is updated, additive membership is converged, Kubernetes DNS/published Services are reconciled, and the external ingress policy is reconciled last.

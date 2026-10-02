@@ -252,7 +252,7 @@ Manual workflow dispatch remains available for an explicitly supplied hardened r
 
 ## Deployment
 
-d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.
+d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a read-only ClusterRole for cluster-scoped discovery. The ClusterRole carries the startup Namespace read (restricted to the configured namespace) plus node and StorageClass reads used by Swarm/storage compatibility.
 
 ```bash
 kubectl apply -f deploy/kubernetes.yaml
@@ -335,30 +335,27 @@ Kubernetes namespace
 
 ## RBAC
 
-Docker host mode requires namespace-scoped permissions only.
-
-| Resource | Verbs |
-|---|---|
-| deployments | get, list, watch, create, update, patch, delete |
-| pods | get, list, watch, patch _(patch is used only to reconcile live Docker-network membership)_ |
-| pods/log | get |
-| pods/exec | create |
-| services | get, list, watch, create, update, patch, delete |
-| configmaps | get, list, watch, create, update, patch, delete |
-| secrets | get, list, watch, create, update, patch, delete |
-| persistentvolumeclaims | get, list, watch, create, delete |
-| namespaces | get |
-| events | get, list |
-| metrics.k8s.io/pods | get, list _(optional)_ |
-
-Swarm mode adds a ClusterRole for node and StorageClass access:
+Workload mutation remains namespace-scoped. Cluster-scoped permissions are read-only.
 
 | Resource | Verbs | Scope |
 |---|---|---|
+| deployments | get, list, watch, create, update, patch, delete | Role |
+| pods | get, list, watch, patch _(patch is used only to reconcile live Docker-network membership)_ | Role |
+| pods/log | get | Role |
+| pods/exec | create | Role |
+| services | get, list, watch, create, update, patch, delete | Role |
+| configmaps | get, list, watch, create, update, patch, delete | Role |
+| secrets | get, list, watch, create, update, patch, delete | Role |
+| persistentvolumeclaims | get, list, watch, create, delete | Role |
+| networkpolicies | get, list, watch, create, update, patch, delete | Role |
+| resourcequotas | get, list | Role |
+| events | get, list | Role |
+| metrics.k8s.io/pods | get, list _(optional)_ | Role |
+| target namespace | get | ClusterRole, restricted with `resourceNames` |
 | nodes | get, list, watch | ClusterRole |
 | storageclasses | get, list, watch | ClusterRole |
 
-Node StorageClass read access is required for NFS volume matching.
+The Namespace object is cluster-scoped, so its startup connectivity check cannot be granted by a namespaced Role. Node reads support Swarm node views; StorageClass reads support volume/NFS matching.
 
 ---
 
