@@ -148,10 +148,14 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		Spec: clusterSpec,
 	}
 	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
-		if !errors.IsAlreadyExists(svcErr) {
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+		if errors.IsAlreadyExists(svcErr) {
+			return "", warnings, fmt.Errorf(
+				"DNS service name %q already exists; refusing to attach container %q to an ambiguous Kubernetes DNS identity",
+				clusterSvc.Name, opts.Name,
+			)
 		}
+		return "", warnings, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
 	}
 
 	// Create a LoadBalancer or NodePort Service for externally published ports.

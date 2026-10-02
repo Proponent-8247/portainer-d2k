@@ -1072,10 +1072,15 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		Spec: clusterSvcSpec,
 	}
 	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
-		if !errors.IsAlreadyExists(svcErr) {
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-			return nil, fmt.Errorf("unable to create DNS service for %q: %w", name, svcErr)
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+		if errors.IsAlreadyExists(svcErr) {
+			return nil, fmt.Errorf(
+				"DNS service name %q already exists while creating Swarm service %q; "+
+					"two workloads cannot safely share the same bare Kubernetes DNS name in one d2k namespace",
+				dnsName, spec.Name,
+			)
 		}
+		return nil, fmt.Errorf("unable to create DNS service for %q: %w", name, svcErr)
 	}
 
 	// Create a LoadBalancer Service for externally published ports — but only

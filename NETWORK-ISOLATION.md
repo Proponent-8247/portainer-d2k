@@ -158,3 +158,12 @@ On startup, after validating each managed Deployment and Pod template, d2k recon
 Standalone `docker rename` is implemented as a fail-safe Kubernetes identity replacement because Deployment names and selectors are immutable identity. D2K creates the complete replacement Deployment/DNS Service/published Service/published ingress policy first, preserving Docker-network membership, then removes the old Deployment and its owned resources. If replacement creation fails, the new partial resources are rolled back and the old container remains intact.
 
 Swarm-managed workloads reject `docker rename` and `docker start`; their lifecycle is owned by the Swarm service API.
+
+
+## DNS collision safety
+
+Docker's embedded DNS scopes aliases to Docker networks, while Kubernetes Service DNS is namespace-scoped. The current translator cannot safely provide two different `db` Service objects in the same Kubernetes namespace for two isolated stacks.
+
+Bare DNS-name collisions therefore fail closed: if a standalone container or newly created Swarm service would reuse an existing Kubernetes DNS Service name, d2k rolls the new workload back and returns an explicit error. It never treats an unrelated existing Service as the new workload's DNS identity.
+
+Network isolation itself remains correct; fully network-scoped duplicate aliases would require a dedicated Docker-compatible DNS layer rather than another CNI.

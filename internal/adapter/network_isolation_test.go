@@ -1254,3 +1254,40 @@ func TestSwarmCreateExistingReconcilesNetworksServicesAndPolicy(t *testing.T) {
 		t.Fatalf("published policy was not reconciled: %#v", policy.Spec.Ingress)
 	}
 }
+
+
+func TestSwarmCreateFailsClosedOnBareDNSCollision(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("stack-b-default", false, false)
+	existingDNS := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "db", Namespace: "d2k-workloads",
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": "stack-a-db",
+			},
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: "None", Selector: managedSelector("stack-a-db")},
+	}
+	a := newIsolationTestAdapter(existingDNS)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	body := strings.NewReader(`{
+		"Name":"stack_b_db",
+		"TaskTemplate":{"ContainerSpec":{"Image":"postgres:latest"},"Networks":[{"Target":"` + network.ID + `"}]},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	if _, err := a.SwarmCreateService(ctx, body); err == nil || !strings.Contains(err.Error(), "DNS service name") {
+		t.Fatalf("expected explicit DNS collision failure, got %v", err)
+	}
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "stack-b-db", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("deployment remained after DNS collision: %v", err)
+	}
+	got, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "db", metav1.GetOptions{})
+	if err != nil || got.Annotations["d2k.portainer.io/dns-for-deploy"] != "stack-a-db" {
+		t.Fatalf("pre-existing DNS identity was altered: %#v %v", got, err)
+	}
+}

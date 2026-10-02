@@ -395,7 +395,7 @@ Additional networking features with no Kubernetes equivalent:
 ## Limitations
 
 - Bind mounts from arbitrary host paths are unreliable in multi-node clusters.
-- Docker network-scoped DNS aliases are not a complete replacement for Docker's embedded DNS. The isolation layer preserves network membership/security, but two stacks that rely on the same bare service alias in one Kubernetes namespace can still collide at the DNS-Service layer.
+- Docker network-scoped DNS aliases are not a complete replacement for Docker's embedded DNS. The isolation layer preserves network membership/security, but Kubernetes DNS remains namespace-scoped. If two stacks try to claim the same bare service DNS name in one d2k namespace, d2k now fails the second create and rolls its workload back instead of silently routing that name to the wrong stack.
 - Docker-network isolation is enforced when `D2K_NETWORK_ISOLATION=true`; it remains compatibility-only when disabled.
 - Image metadata is synthesised. Actual image metadata lives on cluster nodes.
 - `docker stats` requires metrics-server to return real data.
