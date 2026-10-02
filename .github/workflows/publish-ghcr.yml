@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Image tag to publish"
         required: true
-        default: "1.2.3-kit.netiso.2"
+        default: "1.2.3-kit.netiso.3"
 
 permissions:
   contents: read
@@ -34,6 +34,13 @@ jobs:
           go test ./...
           go test -race ./...
           go build ./...
+          bash -n hack/validate-network-isolation.sh
+          grep -q 'resources: \["networkpolicies"\]' deploy/kubernetes.yaml
+          grep -q 'verbs: \["get", "watch", "list", "patch"\]' deploy/kubernetes.yaml
+          grep -q 'D2K_NETWORK_ISOLATION' deploy/kubernetes.yaml
+          grep -q 'D2K_POD_CIDRS' deploy/kubernetes.yaml
+          grep -q 'D2K_SERVICE_CIDRS' deploy/kubernetes.yaml
+          grep -q 'D2K_REJECT_HOST_NETWORK' deploy/kubernetes.yaml
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0

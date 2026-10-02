@@ -15,7 +15,7 @@ D2K_REJECT_HOST_NETWORK=true
 
 CIDRs are parsed and validated at startup. Invalid or missing CIDRs make d2k fail closed instead of creating an unsafe world-egress policy.
 
-The d2k ServiceAccount also needs namespaced CRUD access to `networking.k8s.io/networkpolicies`. The bundled `deploy/kubernetes.yaml` includes that RBAC permission.
+The d2k ServiceAccount also needs namespaced CRUD access to `networking.k8s.io/networkpolicies` plus `patch` on Pods so d2k can converge only its network-membership labels/annotation on already-running workloads. The bundled `deploy/kubernetes.yaml` includes both permissions.
 
 ## Security model
 
