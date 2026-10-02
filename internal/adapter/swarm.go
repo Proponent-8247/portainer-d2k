@@ -950,7 +950,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		if err := a.ensurePublishedIngressPolicy(ctx, name, swarmNetworkPolicyPorts(spec)); err != nil {
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(name)+"-lb", metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(name), metav1.DeleteOptions{})
 			return nil, fmt.Errorf("unable to create published-port isolation policy for %q: %w", name, err)
 		}
 	}
