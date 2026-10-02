@@ -69,7 +69,7 @@ func publishedPolicyName(name string) string {
 }
 
 func encodeNetworkIDs(ids []string) string {
-	ids = append([]string(nil), ids...)
+	ids = append([]string{}, ids...)
 	sort.Strings(ids)
 	b, _ := json.Marshal(ids)
 	return string(b)

@@ -274,7 +274,7 @@ func TestContainerReadbackUsesEnforcedNetworks(t *testing.T) {
 func TestStackRemovalCleansNetworkAndPublishedPolicies(t *testing.T) {
 	ctx := context.Background()
 	network := testNetwork("demo_default", false, true)
-	network.Labels["com.docker.compose.project"] = "demo"
+	network.Labels["com.docker.stack.namespace"] = "demo"
 	deployment := managedDeployment("demo-web", network.ID)
 	deployment.UID = "service-uid"
 	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
