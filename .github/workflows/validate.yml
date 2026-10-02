@@ -38,6 +38,16 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
+      - name: Verify network-isolation harness and manifest
+        run: |
+          bash -n hack/validate-network-isolation.sh
+          grep -q 'resources: \["networkpolicies"\]' deploy/kubernetes.yaml
+          grep -q 'D2K_NETWORK_ISOLATION' deploy/kubernetes.yaml
+          grep -q 'D2K_POD_CIDRS' deploy/kubernetes.yaml
+          grep -q 'D2K_SERVICE_CIDRS' deploy/kubernetes.yaml
+          grep -q 'D2K_REJECT_HOST_NETWORK' deploy/kubernetes.yaml
+
+
       - name: Vet
         run: go vet ./...
 

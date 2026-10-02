@@ -72,7 +72,7 @@ This keeps Portainer's Docker/Swarm view aligned with the network membership Cil
 
 `docker network connect` respects Swarm overlay `Attachable`; a standalone container cannot manually join a non-attachable overlay.
 
-`docker stack rm` routes service and network deletion through canonical cleanup paths so it also removes published-port policies, persisted network ConfigMaps, and network isolation policies. External networks remain because they do not carry the stack's Compose project label.
+`docker stack rm` routes service and network deletion through canonical cleanup paths so it also removes published-port policies, persisted network ConfigMaps, and network isolation policies. In isolation mode, stack ownership is taken from Docker's explicit `com.docker.stack.namespace` label; external networks without that label remain intact.
 
 Network create failures roll back partially persisted state.
 
@@ -128,3 +128,6 @@ Swarm service updates reapply the requested mutation after Kubernetes optimistic
 Published-port policy is reconciled only after the workload update succeeds. If policy reconciliation fails, d2k removes the allow policy best-effort and returns an error so the failure mode is closed.
 
 Swarm DNS Services are removed using the explicit `d2k.portainer.io/dns-for-deploy` ownership annotation. d2k does not attempt to reconstruct a bare DNS name from a sanitised Deployment name, which is ambiguous when stack or service names contain hyphens.
+
+
+The live validation harness also verifies initial attachment to non-attachable overlays is rejected, host-network escape is rejected, macvlan/ipvlan creation fails explicitly, a full disconnect remains disconnected in API readback, ordinary networks retain world egress, and internal networks do not.
