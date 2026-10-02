@@ -21,12 +21,13 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Docker concept | Kubernetes translation |
 |---|---|
 | `docker run` | Deployment (replicas=1) |
-| `docker stop` | Scale Deployment to 0 |
-| `docker start` | Scale Deployment to 1 |
-| `docker rm` | Delete Deployment + Service |
+| `docker stop` | Scale standalone Deployment to 0; Swarm-owned workloads are rejected |
+| `docker start` | Scale standalone Deployment to 1; Swarm-owned workloads are rejected |
+| `docker rm` | Delete standalone Deployment + owned Services/policy; Swarm-owned workloads are rejected |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
+| `docker rename` | Recreate standalone Kubernetes identity transactionally while preserving networks/publication; Swarm-owned workloads are rejected |
 | `docker volume create` | PersistentVolumeClaim |
 | `docker network create` | Logical network persisted and enforced with NetworkPolicy when isolation is enabled |
 | `docker pull` | Acknowledged — Kubernetes pulls at schedule time |
@@ -316,7 +317,8 @@ Docker client
 |  +-- container.go   (Deployments)        |
 |  +-- swarm.go       (Swarm surface)      |
 |  +-- volume.go      (PVCs)               |
-|  +-- network.go     (synthetic)          |
+|  +-- network.go + network_isolation.go    |
+|  |      (logical networks + policy)        |
 |  +-- logs.go        (pod log stream)     |
 |  +-- exec.go        (pod exec/SPDY)      |
 |  +-- metrics.go     (metrics-server)     |
@@ -336,7 +338,7 @@ Docker host mode requires namespace-scoped permissions only.
 | Resource | Verbs |
 |---|---|
 | deployments | get, list, watch, create, update, patch, delete |
-| pods | get, list, watch |
+| pods | get, list, watch, patch _(patch is used only to reconcile live Docker-network membership)_ |
 | pods/log | get |
 | pods/exec | create |
 | services | get, list, watch, create, update, patch, delete |
@@ -372,7 +374,7 @@ These features are absent by design. They reflect fundamental differences betwee
 
 Additional networking features with no Kubernetes equivalent:
 
-- `--network host` — host network namespace sharing. Use `hostNetwork: true` in a raw Kubernetes manifest instead.
+- `--network host` — rejected by default while D2K network isolation is enabled because host networking bypasses pod-level NetworkPolicy. Use a raw Kubernetes manifest only when deliberately accepting that different security model.
 - Per-container `--dns` and `--dns-search` overrides. DNS in Kubernetes is cluster-wide and namespace-scoped via CoreDNS.
 - `--ip` and `--mac-address` — static IP and MAC assignment. Not applicable in CNI-managed networking.
 - `--link` — legacy Docker container linking. Has no Kubernetes equivalent.
