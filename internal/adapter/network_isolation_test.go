@@ -903,7 +903,6 @@ func TestConnectPatchesLivePodMembershipAfterDeploymentUpdate(t *testing.T) {
 	}
 }
 
-
 func TestStartupReconcilesLivePodMembershipFromDeployment(t *testing.T) {
 	ctx := context.Background()
 	front := testNetwork("front", false, true)
@@ -913,9 +912,9 @@ func TestStartupReconcilesLivePodMembershipFromDeployment(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "web-stale", Namespace: "d2k-workloads",
 			Labels: map[string]string{
-				"app":                     "web",
-				types.LabelManagedBy:      types.LabelManagedByValue,
-				networkLabelKey(back.ID):  "true",
+				"app":                    "web",
+				types.LabelManagedBy:     types.LabelManagedByValue,
+				networkLabelKey(back.ID): "true",
 			},
 			Annotations: map[string]string{
 				types.AnnotationNetworkIDs: encodeNetworkIDs([]string{back.ID}),
