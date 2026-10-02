@@ -241,8 +241,10 @@ The Talos deployment kit consumes the exact GHCR build, not a mutable `latest` t
 The reviewed build line is:
 
 ```text
-ghcr.io/proponent-8247/portainer-d2k:1.2.3-kit.netiso.4
+ghcr.io/proponent-8247/portainer-d2k:1.2.3-kit.netiso.5
 ```
+
+Release images inject the hardened image tag into the D2K binary, so Docker `/version` and `/info` report the exact build identity rather than a legacy placeholder. OCI metadata separately records both the release version and source commit revision.
 
 Changing `release/ghcr-image-tag.txt` on `develop` triggers the privileged GHCR release workflow. The workflow reruns formatting/module checks, vet, unit tests, race tests, full build, and isolation manifest/harness validation before building and publishing amd64+arm64 images with SBOM/provenance metadata.
 

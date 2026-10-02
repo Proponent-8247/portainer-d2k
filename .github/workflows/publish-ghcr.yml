@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Image tag to publish"
         required: true
-        default: "1.2.3-kit.netiso.4"
+        default: "1.2.3-kit.netiso.5"
   push:
     branches: [develop]
     paths:
@@ -84,7 +84,9 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.release.outputs.tag }}
+            REVISION=${{ github.sha }}
           tags: ghcr.io/proponent-8247/portainer-d2k:${{ steps.release.outputs.tag }}
           sbom: true
           provenance: mode=max

@@ -66,7 +66,9 @@ jobs:
           push: false
           load: false
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            REVISION=${{ github.sha }}
           tags: ${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
           outputs: type=oci,dest=/tmp/image.tar
 
@@ -104,7 +106,9 @@ jobs:
         with:
           push: true
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            REVISION=${{ github.sha }}
           tags: portainerci/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
           sbom: true
           provenance: mode=max
@@ -116,5 +120,7 @@ jobs:
         with:
           push: false
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            REVISION=${{ github.sha }}
           tags: d2k:${{ needs.tag.outputs.value }}
