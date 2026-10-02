@@ -224,7 +224,7 @@ func (a *KubernetesDockerAdapter) persistNetwork(ctx context.Context, n *Network
 			Namespace: a.namespace,
 			Labels: map[string]string{
 				types.LabelNetworkState: "true",
-				types.LabelManagedBy:     types.LabelManagedByValue,
+				types.LabelManagedBy:    types.LabelManagedByValue,
 			},
 		},
 		Data: map[string]string{

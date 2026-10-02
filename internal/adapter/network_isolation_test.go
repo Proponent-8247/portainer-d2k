@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -12,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
-	"go.uber.org/zap"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -47,8 +47,8 @@ func testNetwork(name string, internal, attachable bool) *NetworkSummary {
 
 func managedDeployment(name string, networkIDs ...string) *appsv1.Deployment {
 	labels := map[string]string{
-		"app":                  name,
-		types.LabelManagedBy:   types.LabelManagedByValue,
+		"app":                   name,
+		types.LabelManagedBy:    types.LabelManagedByValue,
 		types.LabelWorkloadName: name,
 	}
 	for _, id := range networkIDs {
