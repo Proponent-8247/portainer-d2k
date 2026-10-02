@@ -243,7 +243,7 @@ kubectl apply -f deploy/kubernetes.yaml
 
 For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 
-To enable Docker-network-equivalent isolation, also set `D2K_NETWORK_ISOLATION=true` and provide the cluster's real Pod and Service CIDRs. The manifest already includes the required namespaced NetworkPolicy RBAC. Do not pre-create the d2k workload default-deny policy during migration; d2k installs it only after its legacy-workload safety preflight succeeds.
+To enable Docker-network-equivalent isolation, also set `D2K_NETWORK_ISOLATION=true` and provide the cluster's real Pod and Service CIDRs. The manifest already includes the required namespaced NetworkPolicy RBAC and the namespaced Pod `patch` permission used only to converge d2k network-membership metadata on already-running Pods. Do not pre-create the d2k workload default-deny policy during migration; d2k installs it only after its legacy-workload safety preflight succeeds.
 
 Connect Portainer or the Docker CLI to the d2k Service:
 
