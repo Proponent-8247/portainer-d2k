@@ -944,7 +944,6 @@ func TestStartupReconcilesLivePodMembershipFromDeployment(t *testing.T) {
 	}
 }
 
-
 func TestRenameContainerRewritesOwnedResourcesAndIsolationPolicy(t *testing.T) {
 	ctx := context.Background()
 	network := testNetwork("front", false, true)
@@ -955,15 +954,15 @@ func TestRenameContainerRewritesOwnedResourcesAndIsolationPolicy(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "old-name", Namespace: "d2k-workloads", Labels: managedLabels("old-name")},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "old-name"},
-			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+			Ports:    []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
 		},
 	}
 	published := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("old-name"), Namespace: "d2k-workloads", Labels: managedLabels("old-name")},
 		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeLoadBalancer,
+			Type:     corev1.ServiceTypeLoadBalancer,
 			Selector: map[string]string{"app": "old-name"},
-			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+			Ports:    []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 		},
 	}
 	a := newIsolationTestAdapter(deployment, dns, published)
