@@ -1062,6 +1062,12 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			},
 		}
 		if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, lbSvc, metav1.CreateOptions{}); svcErr != nil {
+			if a.networkIsolation {
+				_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+				_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
+				_ = a.deletePublishedIngressPolicy(ctx, name)
+				return nil, fmt.Errorf("unable to publish LoadBalancer service for %q while network isolation is enabled: %w", name, svcErr)
+			}
 			warnings = append(warnings, fmt.Sprintf("d2k: unable to create LoadBalancer service for %q: %s", name, svcErr))
 		}
 	}

@@ -789,3 +789,35 @@ func TestSwarmUpdateHostPublishingRemovesLoadBalancer(t *testing.T) {
 		t.Fatalf("LoadBalancer service still exists in host-publish mode: %v", err)
 	}
 }
+
+
+func TestSwarmCreateFailsClosedWhenPublishedServiceCreationFails(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	a := newIsolationTestAdapter()
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	client := a.client.(*fake.Clientset)
+	client.Fake.PrependReactor("create", "services", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		create := action.(k8stesting.CreateAction)
+		service := create.GetObject().(*corev1.Service)
+		if service.Name == publishedServiceName("svc") {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "services"}, service.Name, fmt.Errorf("test denial"))
+		}
+		return false, nil, nil
+	})
+
+	body := strings.NewReader(`{"Name":"svc","TaskTemplate":{"ContainerSpec":{"Image":"image:1"},"Networks":[{"Target":"` + network.ID + `"}]},"EndpointSpec":{"Mode":"vip","Ports":[{"Protocol":"tcp","TargetPort":80,"PublishedPort":8080,"PublishMode":"ingress"}]}}`)
+	if _, err := a.SwarmCreateService(ctx, body); err == nil || !strings.Contains(err.Error(), "network isolation is enabled") {
+		t.Fatalf("expected fail-closed published Service error, got %v", err)
+	}
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "svc", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("deployment remained after publication failure: %v", err)
+	}
+	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("svc"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("published allow policy exists despite publication failure: %v", err)
+	}
+}
