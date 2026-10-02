@@ -77,11 +77,24 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		labels[k] = v
 	}
 
+	if existing, found := a.lookupNetwork(opts.Name); found {
+		return nil, warnings, fmt.Errorf("network %q already exists as %q", opts.Name, existing.ID)
+	}
+
+	driver := strings.TrimSpace(opts.Driver)
+	if driver == "" {
+		driver = "overlay"
+	}
+	scope := "local"
+	if driver == "overlay" {
+		scope = "swarm"
+	}
+
 	summary := &NetworkSummary{
 		ID:         networkIDForName(opts.Name, a.namespace),
 		Name:       opts.Name,
-		Driver:     "overlay",
-		Scope:      "swarm",
+		Driver:     driver,
+		Scope:      scope,
 		Internal:   opts.Internal,
 		Attachable: opts.Attachable,
 		IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
@@ -94,26 +107,24 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 
 	if a.networkIsolation {
 		if err := a.persistNetwork(ctx, summary); err != nil {
+			a.networksMu.Lock()
+			delete(a.networks, opts.Name)
+			a.networksMu.Unlock()
 			return nil, warnings, err
 		}
 		if err := a.ensureNetworkIsolationPolicy(ctx, summary); err != nil {
+			_ = a.deletePersistedNetwork(ctx, summary)
+			a.networksMu.Lock()
+			delete(a.networks, opts.Name)
+			a.networksMu.Unlock()
 			return nil, warnings, err
 		}
 	}
 	return summary, warnings, nil
 }
 
-// ListNetworks returns the synthetic network list.
-func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
-	if a.networkIsolation {
-		if err := a.restorePersistedNetworks(ctx); err != nil {
-			return nil, err
-		}
-	}
-	a.networksMu.RLock()
-	defer a.networksMu.RUnlock()
-
-	networks := []NetworkSummary{
+func (a *KubernetesDockerAdapter) builtinNetworks() []NetworkSummary {
+	return []NetworkSummary{
 		{
 			ID:         networkIDForName(a.namespace, a.namespace),
 			Name:       a.namespace,
@@ -165,50 +176,97 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 		},
 	}
 
+}
+
+func (a *KubernetesDockerAdapter) isBuiltinNetwork(network *NetworkSummary) bool {
+	if network == nil {
+		return false
+	}
+	for _, builtin := range a.builtinNetworks() {
+		if builtin.ID == network.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *KubernetesDockerAdapter) lookupNetwork(nameOrID string) (*NetworkSummary, bool) {
+	for _, builtin := range a.builtinNetworks() {
+		if builtin.Name == nameOrID || builtin.ID == nameOrID {
+			network := builtin
+			return &network, true
+		}
+	}
+
+	a.networksMu.RLock()
+	defer a.networksMu.RUnlock()
+	for _, network := range a.networks {
+		if network.Name == nameOrID || network.ID == nameOrID {
+			copy := *network
+			return &copy, true
+		}
+	}
+	return nil, false
+}
+
+// ListNetworks returns the synthetic network list.
+func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
+	if a.networkIsolation {
+		if err := a.restorePersistedNetworks(ctx); err != nil {
+			return nil, err
+		}
+	}
+	a.networksMu.RLock()
+	defer a.networksMu.RUnlock()
+
+	networks := a.builtinNetworks()
 	// Include any networks created via CreateNetwork.
 	for _, n := range a.networks {
 		networks = append(networks, *n)
 	}
 
-	// Add per-service networks for all swarm-managed deployments.
-	// Portainer maps Spec.Networks[].Target against availableNetworks by ID —
-	// if the ID isn't in this list the Networks panel shows empty. We generate
-	// one synthetic overlay network per service, with the LB IP as the IPAM
-	// subnet so Portainer displays it in the IP address column.
-	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
-	})
-	if err == nil {
-		for _, d := range deps.Items {
-			netID := networkIDForName(d.Name, a.namespace)
-			// Look up LB service IP for the subnet value.
-			subnet := "10.0.0.0/8"
-			lbSvc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(d.Name)+"-lb", metav1.GetOptions{})
-			if svcErr == nil {
-				for _, ing := range lbSvc.Status.LoadBalancer.Ingress {
-					if ing.IP != "" {
-						subnet = ing.IP + "/32"
-						break
-					}
-					if ing.Hostname != "" {
-						subnet = ing.Hostname
-						break
+	if !a.networkIsolation {
+		// Add per-service networks for all swarm-managed deployments.
+		// Portainer maps Spec.Networks[].Target against availableNetworks by ID —
+		// if the ID isn't in this list the Networks panel shows empty. We generate
+		// one synthetic overlay network per service, with the LB IP as the IPAM
+		// subnet so Portainer displays it in the IP address column.
+		deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
+		})
+		if err == nil {
+			for _, d := range deps.Items {
+				netID := networkIDForName(d.Name, a.namespace)
+				// Look up LB service IP for the subnet value.
+				subnet := "10.0.0.0/8"
+				lbSvc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(d.Name)+"-lb", metav1.GetOptions{})
+				if svcErr == nil {
+					for _, ing := range lbSvc.Status.LoadBalancer.Ingress {
+						if ing.IP != "" {
+							subnet = ing.IP + "/32"
+							break
+						}
+						if ing.Hostname != "" {
+							subnet = ing.Hostname
+							break
+						}
 					}
 				}
+				networks = append(networks, NetworkSummary{
+					ID:         netID,
+					Name:       d.Name,
+					Driver:     "overlay",
+					Scope:      "swarm",
+					Attachable: true,
+					IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{{Subnet: subnet}}},
+					Labels: map[string]string{
+						types.LabelManagedBy:      types.LabelManagedByValue,
+						types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
+					},
+				})
 			}
-			networks = append(networks, NetworkSummary{
-				ID:         netID,
-				Name:       d.Name,
-				Driver:     "overlay",
-				Scope:      "swarm",
-				Attachable: true,
-				IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{{Subnet: subnet}}},
-				Labels: map[string]string{
-					types.LabelManagedBy:      types.LabelManagedByValue,
-					types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
-				},
-			})
 		}
+
 	}
 
 	return networks, nil
@@ -223,7 +281,12 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 		}
 	}
 
-	// Synthesise a response for unknown networks, with Compose labels if applicable.
+	if a.networkIsolation {
+		return nil, fmt.Errorf("network %q not found", nameOrID)
+	}
+
+	// Synthesise a response for unknown networks when isolation is disabled,
+	// preserving the original compatibility-only behavior.
 	syntheticLabels := map[string]string{}
 	if idx := strings.LastIndex(nameOrID, "_"); idx != -1 {
 		syntheticLabels["com.docker.compose.network"] = nameOrID[idx+1:]
@@ -250,7 +313,7 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 	// Check if this is a per-service network ID (d2k-<namespace>-<service>).
 	// If so, look up the LB Service IP and return it as the IPAM subnet.
 	prefix := "d2k-" + a.namespace + "-"
-	if strings.HasPrefix(nameOrID, prefix) {
+	if !a.networkIsolation && strings.HasPrefix(nameOrID, prefix) {
 		serviceName := strings.TrimPrefix(nameOrID, prefix)
 		if serviceName != "" && serviceName != a.namespace {
 			return a.serviceNetworkDetail(ctx, nameOrID, serviceName)
@@ -260,6 +323,14 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 	network, err := a.InspectNetwork(ctx, nameOrID)
 	if err != nil {
 		return nil, err
+	}
+
+	containers := map[string]any{}
+	if a.networkIsolation {
+		containers, err = a.attachedContainersForNetwork(ctx, network.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return map[string]any{
@@ -279,7 +350,7 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 		"Ingress":    network.Name == "ingress",
 		"ConfigFrom": map[string]any{"Network": ""},
 		"ConfigOnly": false,
-		"Containers": map[string]any{},
+		"Containers": containers,
 		"Options":    map[string]string{},
 		"Labels":     network.Labels,
 	}, nil
@@ -333,38 +404,41 @@ func (a *KubernetesDockerAdapter) serviceNetworkDetail(ctx context.Context, netw
 // RemoveNetwork removes a d2k-managed network by name or ID.
 // Built-in networks (bridge, host, none) return an error matching Docker behaviour.
 func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID string) error {
-	switch nameOrID {
-	case "bridge", "host", "none":
-		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
+	if a.networkIsolation {
+		if err := a.restorePersistedNetworks(ctx); err != nil {
+			return err
+		}
+	}
+
+	network, found := a.lookupNetwork(nameOrID)
+	if !found {
+		// Docker treats removing an already-absent network as idempotent.
+		return nil
+	}
+	if a.isBuiltinNetwork(network) {
+		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", network.Name)
+	}
+
+	if a.networkIsolation {
+		users, err := a.networkInUse(ctx, network.ID)
+		if err != nil {
+			return fmt.Errorf("unable to determine whether network %q is in use: %w", network.Name, err)
+		}
+		if len(users) > 0 {
+			return fmt.Errorf("network %q has active endpoints (%s); disconnect or remove those workloads first", network.Name, strings.Join(users, ", "))
+		}
+
+		if err := a.deletePersistedNetwork(ctx, network); err != nil {
+			return fmt.Errorf("unable to delete persisted state for network %q: %w", network.Name, err)
+		}
+		if err := a.deleteNetworkIsolationPolicy(ctx, network.ID); err != nil {
+			return fmt.Errorf("unable to delete isolation policy for network %q: %w", network.Name, err)
+		}
 	}
 
 	a.networksMu.Lock()
-	defer a.networksMu.Unlock()
-
-	// Try direct name match first.
-	if n, ok := a.networks[nameOrID]; ok {
-		delete(a.networks, nameOrID)
-		if a.networkIsolation {
-			_ = a.deletePersistedNetwork(ctx, n)
-			_ = a.deleteNetworkIsolationPolicy(ctx, n.ID)
-		}
-		return nil
-	}
-
-	// Fall back to ID match — the Docker CLI sends the synthetic ID
-	// (e.g. "d2k-d2k-example-app_backend") rather than the name.
-	for netName, net := range a.networks {
-		if net.ID == nameOrID {
-			delete(a.networks, netName)
-			if a.networkIsolation {
-				_ = a.deletePersistedNetwork(ctx, net)
-				_ = a.deleteNetworkIsolationPolicy(ctx, net.ID)
-			}
-			return nil
-		}
-	}
-
-	// Not found — return nil to match Docker behaviour (idempotent remove).
+	delete(a.networks, network.Name)
+	a.networksMu.Unlock()
 	return nil
 }
 

@@ -100,6 +100,18 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		}
 	}
 
+	var podCIDRs, serviceCIDRs []string
+	if opts.Config.NetworkIsolation {
+		podCIDRs, err = parseCIDRList(opts.Config.PodCIDRs, "D2K_POD_CIDRS")
+		if err != nil {
+			return nil, err
+		}
+		serviceCIDRs, err = parseCIDRList(opts.Config.ServiceCIDRs, "D2K_SERVICE_CIDRS")
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	a := &KubernetesDockerAdapter{
 		client:           client,
 		metricsClient:    mc,
@@ -110,8 +122,8 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		gpuResourceName:  opts.Config.GPUResourceName,
 		networkIsolation: opts.Config.NetworkIsolation,
 		rejectHostNetwork: opts.Config.RejectHostNetwork,
-		podCIDRs:          splitCIDRs(opts.Config.PodCIDRs),
-		serviceCIDRs:      splitCIDRs(opts.Config.ServiceCIDRs),
+		podCIDRs:          podCIDRs,
+		serviceCIDRs:      serviceCIDRs,
 		logger:           opts.Logger,
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
@@ -121,11 +133,8 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		if len(a.podCIDRs) == 0 || len(a.serviceCIDRs) == 0 {
 			return nil, fmt.Errorf("network isolation requires D2K_POD_CIDRS and D2K_SERVICE_CIDRS")
 		}
-		if err := a.restorePersistedNetworks(context.Background()); err != nil {
-			return nil, fmt.Errorf("unable to restore persisted Docker network state: %w", err)
-		}
-		if err := a.ensureIsolationBaseline(context.Background()); err != nil {
-			return nil, fmt.Errorf("unable to establish fail-closed Docker workload isolation: %w", err)
+		if err := a.reconcileIsolationState(context.Background()); err != nil {
+			return nil, fmt.Errorf("unable to initialize Docker-network isolation safely: %w", err)
 		}
 		opts.Logger.Infow("Docker-network-equivalent isolation enabled", "podCIDRs", a.podCIDRs, "serviceCIDRs", a.serviceCIDRs)
 	}

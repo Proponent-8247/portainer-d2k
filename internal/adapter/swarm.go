@@ -779,16 +779,10 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			deployment.Spec.Template.Annotations = map[string]string{}
 		}
 		deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = encodeNetworkIDs(networkIDs)
-		if err := a.ensurePublishedIngressPolicy(ctx, name, swarmNetworkPolicyPorts(spec)); err != nil {
-			return nil, err
-		}
 	}
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
-		if a.networkIsolation {
-			_ = a.deletePublishedIngressPolicy(ctx, name)
-		}
 		if errors.IsAlreadyExists(err) {
 			// docker stack deploy is idempotent — if the deployment already exists,
 			// update it in place rather than failing. This matches real Swarm
@@ -809,6 +803,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			serviceID := updated.Annotations[types.AnnotationSwarmServiceID]
 			if serviceID == "" {
 				serviceID = swarmID(string(updated.UID))
+			}
+			if a.networkIsolation {
+				if policyErr := a.ensurePublishedIngressPolicy(ctx, name, swarmNetworkPolicyPorts(spec)); policyErr != nil {
+					return nil, fmt.Errorf("unable to reconcile published-port isolation policy for %q: %w", name, policyErr)
+				}
 			}
 			return map[string]any{
 				"ID":       serviceID,
@@ -938,6 +937,15 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, lbSvc, metav1.CreateOptions{}); svcErr != nil {
 				warnings = append(warnings, fmt.Sprintf("d2k: unable to create LoadBalancer service for %q: %s", name, svcErr))
 			}
+		}
+	}
+
+	if a.networkIsolation {
+		if err := a.ensurePublishedIngressPolicy(ctx, name, swarmNetworkPolicyPorts(spec)); err != nil {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(name)+"-lb", metav1.DeleteOptions{})
+			return nil, fmt.Errorf("unable to create published-port isolation policy for %q: %w", name, err)
 		}
 	}
 
@@ -1642,56 +1650,61 @@ func (a *KubernetesDockerAdapter) SwarmListStacks(ctx context.Context) ([]map[st
 // SwarmDeleteStack removes all services (Deployments + k8s Services) belonging
 // to a stack, plus any secrets and configs labelled with that stack name.
 func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackName string) error {
-	// Delete Deployments.
-	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmStack + "=" + stackName,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to list deployments for stack %q: %w", stackName, err)
 	}
-	for _, d := range deps.Items {
-		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
-		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
-		// DNS service is registered under the bare name for stack services.
-		dnsName := d.Name
-		if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
-			if bare := d.Name[idx+1:]; bare != "" {
-				dnsName = bare
-			}
+
+	// Use the canonical service deletion path so every service-owned resource,
+	// including published-port NetworkPolicies, is cleaned consistently.
+	for _, deployment := range deployments.Items {
+		if err := a.SwarmDeleteService(ctx, deployment.Name); err != nil {
+			return fmt.Errorf("unable to remove service %q from stack %q: %w", deployment.Name, stackName, err)
 		}
-		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
 	}
 
-	// Delete Secrets labelled with this stack.
 	secrets, _ := a.client.CoreV1().Secrets(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmStack + "=" + stackName,
 	})
 	if secrets != nil {
-		for _, s := range secrets.Items {
-			_ = a.client.CoreV1().Secrets(a.namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
+		for _, secret := range secrets.Items {
+			_ = a.client.CoreV1().Secrets(a.namespace).Delete(ctx, secret.Name, metav1.DeleteOptions{})
 		}
 	}
 
-	// Delete ConfigMaps labelled with this stack.
-	cms, _ := a.client.CoreV1().ConfigMaps(a.namespace).List(ctx, metav1.ListOptions{
+	configMaps, _ := a.client.CoreV1().ConfigMaps(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmStack + "=" + stackName,
 	})
-	if cms != nil {
-		for _, c := range cms.Items {
-			_ = a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, c.Name, metav1.DeleteOptions{})
+	if configMaps != nil {
+		for _, configMap := range configMaps.Items {
+			_ = a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, configMap.Name, metav1.DeleteOptions{})
 		}
 	}
 
-	// Delete in-memory networks belonging to this stack.
-	// Stack networks follow the "<stack>_<network>" naming convention.
-	// We match by the com.docker.compose.project label stored at create time.
-	a.networksMu.Lock()
-	for netName, net := range a.networks {
-		if net.Labels["com.docker.compose.project"] == stackName {
-			delete(a.networks, netName)
+	// Remove only stack-owned networks. External networks are not created with
+	// the stack's Compose project label and therefore remain intact.
+	if a.networkIsolation {
+		if err := a.restorePersistedNetworks(ctx); err != nil {
+			return err
 		}
 	}
-	a.networksMu.Unlock()
+	a.networksMu.RLock()
+	var networkNames []string
+	for name, network := range a.networks {
+		if network.Labels["com.docker.compose.project"] == stackName {
+			networkNames = append(networkNames, name)
+		}
+	}
+	a.networksMu.RUnlock()
+	sort.Strings(networkNames)
+
+	for _, name := range networkNames {
+		if err := a.RemoveNetwork(ctx, name); err != nil {
+			return fmt.Errorf("unable to remove network %q from stack %q: %w", name, stackName, err)
+		}
+	}
 
 	return nil
 }

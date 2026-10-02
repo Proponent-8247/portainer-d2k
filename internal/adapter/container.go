@@ -94,16 +94,10 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		if err := a.applyDeploymentNetworks(ctx, deployment, opts.Networks, "bridge"); err != nil {
 			return "", warnings, err
 		}
-		if err := a.ensurePublishedIngressPolicy(ctx, opts.Name, mappingsToNetworkPolicyPorts(mappings)); err != nil {
-			return "", warnings, err
-		}
 	}
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
-		if a.networkIsolation {
-			_ = a.deletePublishedIngressPolicy(ctx, opts.Name)
-		}
 		if errors.IsAlreadyExists(err) {
 			return "", nil, fmt.Errorf("container name %q is already in use", opts.Name)
 		}
@@ -167,6 +161,15 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
+		}
+	}
+
+	if a.networkIsolation {
+		if err := a.ensurePublishedIngressPolicy(ctx, opts.Name, mappingsToNetworkPolicyPorts(mappings)); err != nil {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(opts.Name), metav1.DeleteOptions{})
+			return "", warnings, fmt.Errorf("unable to create published-port isolation policy for %q: %w", opts.Name, err)
 		}
 	}
 
@@ -310,7 +313,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	result := deploymentToContainerJSON(*d, lbIP)
+	result := a.deploymentToContainerJSON(ctx, *d, lbIP)
 	return &result, nil
 }
 
@@ -580,7 +583,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 	}
 }
 
-func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
+func (a *KubernetesDockerAdapter) deploymentToContainerJSON(ctx context.Context, d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
 	running := d.Status.ReadyReplicas > 0
 
 	state := &dockertypes.ContainerState{
@@ -615,6 +618,16 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 		hostConfig.PortBindings = portMap
 	}
 
+	networks := map[string]*network.EndpointSettings{
+		"bridge": {
+			IPAddress: lbIP,
+			NetworkID: "bridge",
+		},
+	}
+	if a.networkIsolation {
+		networks = a.containerNetworkSettings(ctx, d, lbIP)
+	}
+
 	return dockertypes.ContainerJSON{
 		ContainerJSONBase: &dockertypes.ContainerJSONBase{
 			ID:         string(d.UID),
@@ -643,12 +656,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
 				IPAddress: lbIP,
 			},
-			Networks: map[string]*network.EndpointSettings{
-				"bridge": {
-					IPAddress: lbIP,
-					NetworkID: "bridge",
-				},
-			},
+			Networks: networks,
 		},
 	}
 }
