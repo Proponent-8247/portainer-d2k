@@ -248,6 +248,40 @@ spec:
   type: ClusterIP
 
 ---
+# Docker API ingress policy.
+#
+# d2k 1.2.x does not authenticate API clients. The ClusterIP Service above is
+# therefore restricted to explicitly labelled in-cluster clients. Label the
+# Portainer (or other trusted client) Pod template:
+#
+#   d2k.portainer.io/client: "true"
+#
+# External LoadBalancer/NodePort use requires deliberately replacing/extending
+# this policy with source restrictions in addition to enabling TLS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: d2k-api
+  namespace: d2k
+spec:
+  podSelector:
+    matchLabels:
+      app: d2k
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              d2k.portainer.io/client: "true"
+      ports:
+        - protocol: TCP
+          port: 2375
+        - protocol: TCP
+          port: 2376
+
+---
 # OPTION B — NodePort Service
 # Use this when your cluster does not have a load balancer controller (e.g. bare
 # metal, on-prem, or single-node clusters). The Docker API is reachable on every

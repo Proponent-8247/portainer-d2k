@@ -262,7 +262,9 @@ For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before appl
 
 To enable Docker-network-equivalent isolation, also set `D2K_NETWORK_ISOLATION=true` and provide the cluster's real Pod and Service CIDRs. The manifest already includes the required namespaced NetworkPolicy RBAC and the namespaced Pod `patch` permission used only to converge d2k network-membership metadata on already-running Pods. Do not pre-create the d2k workload default-deny policy during migration; d2k installs it only after its legacy-workload safety preflight succeeds.
 
-Connect Portainer or the Docker CLI to the d2k Service:
+The bundled manifest also applies a `d2k-api` NetworkPolicy because the Docker API is not client-authenticated. An in-cluster client must carry the Pod label `d2k.portainer.io/client=true` before it can reach the API Service. The Talos deployment kit generates its own explicit client-namespace/source policy instead.
+
+Connect an allowed Portainer/client Pod to the d2k Service:
 
 ```bash
 # Docker CLI

@@ -174,3 +174,12 @@ Network isolation itself remains correct; fully network-scoped duplicate aliases
 Network and published-port policies select both the deterministic network/workload label and `d2k.portainer.io/managed-by=d2k`. Kubernetes Services likewise select both the workload's `app` identity and the d2k ownership label. An unrelated Pod that happens to reuse an `app` label is therefore not pulled into a d2k Service or external ingress policy.
 
 Re-deploying an already-existing Swarm service follows the same reconciliation ordering as an explicit service update: security-reducing network membership is removed from live Pods first, the Deployment is updated, additive membership is converged, Kubernetes DNS/published Services are reconciled, and the external ingress policy is reconciled last.
+
+
+## Swarm ownership boundary
+
+Direct Docker network connect/disconnect is rejected for Swarm-managed workloads. Their network membership belongs to the Swarm service specification and must be changed through the service/stack API. This prevents a container-level operation from creating membership that Portainer/Swarm readback would immediately disagree with.
+
+## Docker API ingress boundary
+
+The generic Kubernetes manifest keeps the Docker API on ClusterIP and adds a `d2k-api` NetworkPolicy. Only Pods explicitly labelled `d2k.portainer.io/client=true` are admitted by default. Because d2k 1.2.x does not authenticate API clients, exposing the Service as LoadBalancer/NodePort requires an explicit TLS and source-policy design.

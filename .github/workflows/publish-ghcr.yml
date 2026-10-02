@@ -47,6 +47,8 @@ jobs:
           grep -q 'resources: \["namespaces"\]' deploy/kubernetes.yaml
           grep -q 'resourceNames: \["d2k"\]' deploy/kubernetes.yaml
           grep -q 'type: ClusterIP' deploy/kubernetes.yaml
+          grep -q 'name: d2k-api' deploy/kubernetes.yaml
+          grep -q 'd2k.portainer.io/client: "true"' deploy/kubernetes.yaml
           grep -q 'verbs: \["get", "watch", "list", "patch"\]' deploy/kubernetes.yaml
           grep -q 'D2K_NETWORK_ISOLATION' deploy/kubernetes.yaml
           grep -q 'D2K_POD_CIDRS' deploy/kubernetes.yaml

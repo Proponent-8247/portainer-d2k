@@ -1290,3 +1290,36 @@ func TestSwarmCreateFailsClosedOnBareDNSCollision(t *testing.T) {
 		t.Fatalf("pre-existing DNS identity was altered: %#v %v", got, err)
 	}
 }
+
+
+func TestManualNetworkMutationRejectsSwarmManagedWorkload(t *testing.T) {
+	ctx := context.Background()
+	front := testNetwork("front", false, true)
+	back := testNetwork("back", false, true)
+	deployment := managedDeployment("svc", front.ID)
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+
+	a := newIsolationTestAdapter(deployment)
+	for _, network := range []*NetworkSummary{front, back} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+	}
+
+	if err := a.ConnectNetwork(ctx, back.Name, deployment.Name); err == nil || !strings.Contains(err.Error(), "Swarm-managed") {
+		t.Fatalf("expected direct connect rejection for Swarm workload, got %v", err)
+	}
+	if err := a.DisconnectNetwork(ctx, front.Name, deployment.Name); err == nil || !strings.Contains(err.Error(), "Swarm-managed") {
+		t.Fatalf("expected direct disconnect rejection for Swarm workload, got %v", err)
+	}
+
+	got, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if got.Annotations[types.AnnotationNetworkIDs] != encodeNetworkIDs([]string{front.ID}) {
+		t.Fatalf("Swarm workload membership changed through container network API: %q", got.Annotations[types.AnnotationNetworkIDs])
+	}
+}

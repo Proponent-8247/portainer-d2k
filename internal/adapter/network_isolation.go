@@ -796,6 +796,9 @@ func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef
 	if err != nil {
 		return err
 	}
+	if deployment.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot connect a network directly to a Swarm-managed workload: update the service instead")
+	}
 
 	ids, err := parseNetworkIDs(deployment.Annotations[types.AnnotationNetworkIDs])
 	if err != nil {
@@ -826,6 +829,9 @@ func (a *KubernetesDockerAdapter) DisconnectNetwork(ctx context.Context, network
 	deployment, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1.GetOptions{})
 	if err != nil {
 		return err
+	}
+	if deployment.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot disconnect a network directly from a Swarm-managed workload: update the service instead")
 	}
 
 	network, err := a.findNetwork(ctx, networkRef)
