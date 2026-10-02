@@ -435,6 +435,38 @@ func (a *KubernetesDockerAdapter) deploymentUsesNetwork(dep appsv1.Deployment, n
 	return dep.Spec.Template.Labels[networkLabelKey(networkID)] == "true", nil
 }
 
+func (a *KubernetesDockerAdapter) attachedContainersForNetwork(ctx context.Context, networkID string) (map[string]any, error) {
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: types.LabelManagedBy + "=" + types.LabelManagedByValue,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	containers := map[string]any{}
+	for _, deployment := range deployments.Items {
+		used, err := a.deploymentUsesNetwork(deployment, networkID)
+		if err != nil {
+			return nil, fmt.Errorf("workload %q has invalid network metadata: %w", deployment.Name, err)
+		}
+		if !used {
+			continue
+		}
+		id := string(deployment.UID)
+		if id == "" {
+			id = deployment.Name
+		}
+		containers[id] = map[string]any{
+			"Name":        deployment.Name,
+			"EndpointID":  shortHash(networkID + ":" + id),
+			"MacAddress":  "",
+			"IPv4Address": "",
+			"IPv6Address": "",
+		}
+	}
+	return containers, nil
+}
+
 func (a *KubernetesDockerAdapter) networkInUse(ctx context.Context, networkID string) ([]string, error) {
 	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelManagedBy + "=" + types.LabelManagedByValue,

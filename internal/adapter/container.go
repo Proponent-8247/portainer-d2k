@@ -661,6 +661,47 @@ func (a *KubernetesDockerAdapter) deploymentToContainerJSON(ctx context.Context,
 	}
 }
 
+func (a *KubernetesDockerAdapter) containerNetworkSettings(ctx context.Context, d appsv1.Deployment, fallbackIP string) map[string]*network.EndpointSettings {
+	if !a.networkIsolation {
+		return map[string]*network.EndpointSettings{
+			"bridge": {
+				IPAddress: fallbackIP,
+				NetworkID: "bridge",
+			},
+		}
+	}
+
+	if err := a.restorePersistedNetworks(ctx); err != nil {
+		a.logger.Warnw("unable to restore network state for container inspect", "container", d.Name, "error", err)
+	}
+
+	ipAddress := fallbackIP
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=" + d.Name,
+	})
+	if err == nil {
+		for _, pod := range pods.Items {
+			if pod.Status.PodIP != "" {
+				ipAddress = pod.Status.PodIP
+				break
+			}
+		}
+	}
+
+	result := map[string]*network.EndpointSettings{}
+	for _, id := range decodeNetworkIDs(d.Annotations[types.AnnotationNetworkIDs]) {
+		name := id
+		if summary, ok := a.lookupNetwork(id); ok {
+			name = summary.Name
+		}
+		result[name] = &network.EndpointSettings{
+			IPAddress: ipAddress,
+			NetworkID: id,
+		}
+	}
+	return result
+}
+
 // humanizeDuration formats a duration the way Docker does in docker ps STATUS:
 // seconds, minutes, hours up to 47h, then days, weeks, months, years.
 func humanizeDuration(d time.Duration) string {
