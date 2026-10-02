@@ -1,9 +1,10 @@
 package types
 
-const (
-	// Version is the d2k server version, reported in Docker API version responses.
-	Version = "0.1.0"
+// Version is the build identity reported through Docker /version and /info.
+// Release images override it with -X at link time; source builds report "dev".
+var Version = "dev"
 
+const (
 	// DockerAPIVersion is the Docker API version we claim to implement.
 	DockerAPIVersion = "1.41"
 
