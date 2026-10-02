@@ -618,7 +618,6 @@ func TestSwarmDeleteServiceUsesDNSOwnershipAnnotation(t *testing.T) {
 	}
 }
 
-
 func TestSwarmUpdateReconcilesServicesAndPublishedPolicy(t *testing.T) {
 	ctx := context.Background()
 	network := testNetwork("front", false, true)
@@ -639,7 +638,7 @@ func TestSwarmUpdateReconcilesServicesAndPublishedPolicy(t *testing.T) {
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "svc"},
-			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+			Ports:    []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
 		},
 	}
 	lb := &corev1.Service{
@@ -702,7 +701,7 @@ func TestSwarmUpdateClearsPublishedServiceAndPreservesHeadlessDNS(t *testing.T) 
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "svc"},
-			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+			Ports:    []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
 		},
 	}
 	lb := &corev1.Service{
