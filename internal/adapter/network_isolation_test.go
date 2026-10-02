@@ -902,3 +902,45 @@ func TestConnectPatchesLivePodMembershipAfterDeploymentUpdate(t *testing.T) {
 		t.Fatalf("live pod did not gain additive network membership: %#v", got.Labels)
 	}
 }
+
+
+func TestStartupReconcilesLivePodMembershipFromDeployment(t *testing.T) {
+	ctx := context.Background()
+	front := testNetwork("front", false, true)
+	back := testNetwork("back", false, true)
+	deployment := managedDeployment("web", front.ID)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-stale", Namespace: "d2k-workloads",
+			Labels: map[string]string{
+				"app":                     "web",
+				types.LabelManagedBy:      types.LabelManagedByValue,
+				networkLabelKey(back.ID):  "true",
+			},
+			Annotations: map[string]string{
+				types.AnnotationNetworkIDs: encodeNetworkIDs([]string{back.ID}),
+			},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, pod)
+	for _, network := range []*NetworkSummary{front, back} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+	}
+
+	if err := a.reconcileIsolationState(ctx); err != nil {
+		t.Fatalf("reconcileIsolationState: %v", err)
+	}
+	got, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reconciled pod: %v", err)
+	}
+	if got.Labels[networkLabelKey(front.ID)] != "true" || got.Labels[networkLabelKey(back.ID)] != "" {
+		t.Fatalf("live Pod labels were not reconciled from Deployment membership: %#v", got.Labels)
+	}
+	if got.Annotations[types.AnnotationNetworkIDs] != encodeNetworkIDs([]string{front.ID}) {
+		t.Fatalf("live Pod membership annotation was not reconciled: %q", got.Annotations[types.AnnotationNetworkIDs])
+	}
+}

@@ -196,6 +196,13 @@ func (a *KubernetesDockerAdapter) validateAndReconcileManagedWorkloads(ctx conte
 				return fmt.Errorf("existing d2k workload %q has stale Pod-template network label %q", deployment.Name, key)
 			}
 		}
+
+		// The Deployment/template annotation is authoritative. Reconcile live
+		// Pod metadata before installing/confirming the baseline policy so a
+		// stale Pod identity cannot survive a d2k restart.
+		if err := a.patchExistingPodNetworks(ctx, deployment.Name, ids); err != nil {
+			return fmt.Errorf("unable to reconcile live Pod network membership for %q: %w", deployment.Name, err)
+		}
 	}
 
 	return nil

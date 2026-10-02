@@ -148,3 +148,6 @@ When a Swarm service requests VIP/ingress publication and the Kubernetes LoadBal
 Network connect/disconnect operations update the Deployment template and patch only d2k's network-membership labels/annotation on already-running Pods. This avoids waiting for a Kubernetes rollout before Cilium sees the new security identity. Disconnect/removal changes patch live Pods before the Deployment update (fail-closed); additive connects patch live Pods after the desired Deployment update succeeds.
 
 The d2k ServiceAccount therefore requires the namespaced `patch` verb on Pods in addition to its existing read/log/exec permissions. It does not require broad Pod `update` permission.
+
+
+On startup, after validating each managed Deployment and Pod template, d2k reconciles the network-membership labels/annotation on currently running Pods from that authoritative Deployment state. This repairs stale live identities before the baseline policy is installed or confirmed.
