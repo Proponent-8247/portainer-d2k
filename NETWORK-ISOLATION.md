@@ -151,3 +151,10 @@ The d2k ServiceAccount therefore requires the namespaced `patch` verb on Pods in
 
 
 On startup, after validating each managed Deployment and Pod template, d2k reconciles the network-membership labels/annotation on currently running Pods from that authoritative Deployment state. This repairs stale live identities before the baseline policy is installed or confirmed.
+
+
+## Container rename lifecycle
+
+Standalone `docker rename` is implemented as a fail-safe Kubernetes identity replacement because Deployment names and selectors are immutable identity. D2K creates the complete replacement Deployment/DNS Service/published Service/published ingress policy first, preserving Docker-network membership, then removes the old Deployment and its owned resources. If replacement creation fails, the new partial resources are rolled back and the old container remains intact.
+
+Swarm-managed workloads reject `docker rename` and `docker start`; their lifecycle is owned by the Swarm service API.

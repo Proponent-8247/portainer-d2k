@@ -14,6 +14,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -226,8 +227,20 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 }
 
 // StartContainer implements docker start: scales the Deployment back to 1 replica.
+// Swarm-managed workloads must be changed through the Swarm service API.
 func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name string) error {
-	return a.scaleDeployment(ctx, name, 1)
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if err != nil {
+		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot start a container that is managed by swarm: use docker service scale instead")
+	}
+	return a.scaleDeployment(ctx, resolved, 1)
 }
 
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
@@ -265,7 +278,10 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	return nil
 }
 
-// Rename Container
+// RenameContainer recreates the standalone workload under a new Kubernetes
+// identity while preserving Docker-network membership and publication intent.
+// Swarm-owned workloads are deliberately excluded: their identity belongs to
+// the Swarm service API.
 func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID, newName string) error {
 	resolved, err := a.resolveDeploymentName(ctx, nameOrID)
 	if err != nil {
@@ -276,27 +292,188 @@ func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID,
 	if err != nil {
 		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
 	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot rename a container that is managed by swarm: update the service instead")
+	}
 
-	// Sanitise the new name.
 	newName = strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(newName, "/"), "_", "-"))
 	if len(newName) > 63 {
 		newName = newName[:63]
 	}
 	newName = strings.TrimRight(newName, "-")
+	if newName == "" {
+		return fmt.Errorf("new container name is empty after Kubernetes name sanitisation")
+	}
+	if newName == resolved {
+		return nil
+	}
 
-	// Create a new Deployment with the new name, copying the spec.
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, newName, metav1.GetOptions{}); err == nil {
+		return fmt.Errorf("container name %q is already in use", newName)
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to check target container name %q: %w", newName, err)
+	}
+
+	// Snapshot owned Services and the published ingress policy before creating
+	// anything. Unexpected read failures abort without changing the old
+	// container.
+	var dnsService *corev1.Service
+	if svc, getErr := a.client.CoreV1().Services(a.namespace).Get(ctx, resolved, metav1.GetOptions{}); getErr == nil {
+		dnsService = svc
+	} else if !errors.IsNotFound(getErr) {
+		return fmt.Errorf("unable to inspect DNS service for %q: %w", resolved, getErr)
+	}
+
+	oldPublishedName := publishedServiceName(resolved)
+	var publishedService *corev1.Service
+	if svc, getErr := a.client.CoreV1().Services(a.namespace).Get(ctx, oldPublishedName, metav1.GetOptions{}); getErr == nil {
+		publishedService = svc
+	} else if !errors.IsNotFound(getErr) {
+		return fmt.Errorf("unable to inspect published service for %q: %w", resolved, getErr)
+	}
+
+	var publishedPolicyPorts []networkingv1.NetworkPolicyPort
+	oldPolicyName := publishedPolicyName(resolved)
+	oldPolicyExists := false
+	if a.networkIsolation {
+		policy, getErr := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, oldPolicyName, metav1.GetOptions{})
+		if getErr == nil {
+			oldPolicyExists = true
+			for _, ingress := range policy.Spec.Ingress {
+				publishedPolicyPorts = append(publishedPolicyPorts, ingress.Ports...)
+			}
+		} else if !errors.IsNotFound(getErr) {
+			return fmt.Errorf("unable to inspect published-port isolation policy for %q: %w", resolved, getErr)
+		}
+		if publishedService != nil && !oldPolicyExists {
+			return fmt.Errorf("published service %q exists without its isolation policy; refusing rename until policy state is reconciled", oldPublishedName)
+		}
+	}
+
 	newDeployment := d.DeepCopy()
 	newDeployment.Name = newName
 	newDeployment.ResourceVersion = ""
 	newDeployment.UID = ""
+	newDeployment.Generation = 0
+	newDeployment.CreationTimestamp = metav1.Time{}
+	newDeployment.ManagedFields = nil
+	newDeployment.Status = appsv1.DeploymentStatus{}
+	if newDeployment.Labels == nil {
+		newDeployment.Labels = map[string]string{}
+	}
+	newDeployment.Labels["app"] = newName
+	newDeployment.Labels[types.LabelWorkloadName] = newName
+	if newDeployment.Spec.Selector == nil {
+		newDeployment.Spec.Selector = &metav1.LabelSelector{}
+	}
+	if newDeployment.Spec.Selector.MatchLabels == nil {
+		newDeployment.Spec.Selector.MatchLabels = map[string]string{}
+	}
+	newDeployment.Spec.Selector.MatchLabels["app"] = newName
+	if newDeployment.Spec.Template.Labels == nil {
+		newDeployment.Spec.Template.Labels = map[string]string{}
+	}
+	newDeployment.Spec.Template.Labels["app"] = newName
+	newDeployment.Spec.Template.Labels[types.LabelWorkloadName] = newName
+	if len(newDeployment.Spec.Template.Spec.Containers) > 0 {
+		newDeployment.Spec.Template.Spec.Containers[0].Name = newName
+	}
 
+	resetService := func(old *corev1.Service, name string) *corev1.Service {
+		if old == nil {
+			return nil
+		}
+		svc := old.DeepCopy()
+		svc.Name = name
+		svc.ResourceVersion = ""
+		svc.UID = ""
+		svc.Generation = 0
+		svc.CreationTimestamp = metav1.Time{}
+		svc.ManagedFields = nil
+		svc.Status = corev1.ServiceStatus{}
+		if svc.Labels == nil {
+			svc.Labels = map[string]string{}
+		}
+		svc.Labels["app"] = newName
+		svc.Labels[types.LabelWorkloadName] = newName
+		if svc.Spec.Selector == nil {
+			svc.Spec.Selector = map[string]string{}
+		}
+		svc.Spec.Selector["app"] = newName
+		if svc.Spec.ClusterIP != corev1.ClusterIPNone {
+			svc.Spec.ClusterIP = ""
+		}
+		svc.Spec.ClusterIPs = nil
+		svc.Spec.IPFamilies = nil
+		svc.Spec.IPFamilyPolicy = nil
+		svc.Spec.HealthCheckNodePort = 0
+		for i := range svc.Spec.Ports {
+			svc.Spec.Ports[i].NodePort = 0
+		}
+		return svc
+	}
+
+	newDNS := resetService(dnsService, newName)
+	newPublishedName := publishedServiceName(newName)
+	newPublished := resetService(publishedService, newPublishedName)
+
+	// Build the complete replacement first. The old workload remains untouched
+	// until all resources needed by the new identity exist.
 	if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, newDeployment, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("unable to create renamed deployment %q: %w", newName, err)
 	}
+	rollback := func() {
+		if a.networkIsolation {
+			_ = a.deletePublishedIngressPolicy(ctx, newName)
+		}
+		if newPublished != nil {
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, newPublishedName, metav1.DeleteOptions{})
+		}
+		if newDNS != nil {
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, newName, metav1.DeleteOptions{})
+		}
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, newName, metav1.DeleteOptions{})
+	}
 
-	// Delete the old Deployment.
+	if newDNS != nil {
+		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, newDNS, metav1.CreateOptions{}); err != nil {
+			rollback()
+			return fmt.Errorf("unable to create renamed DNS service %q: %w", newName, err)
+		}
+	}
+	if newPublished != nil {
+		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, newPublished, metav1.CreateOptions{}); err != nil {
+			rollback()
+			return fmt.Errorf("unable to create renamed published service %q: %w", newPublishedName, err)
+		}
+		if a.networkIsolation {
+			if err := a.ensurePublishedIngressPolicy(ctx, newName, publishedPolicyPorts); err != nil {
+				rollback()
+				return fmt.Errorf("unable to create renamed published-port isolation policy for %q: %w", newName, err)
+			}
+		}
+	}
+
+	// Cut over by deleting the old Deployment first. Any later cleanup failure
+	// leaves only stale selectors/policy that match no live old workload.
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
+		rollback()
 		return fmt.Errorf("unable to delete old deployment %q: %w", resolved, err)
+	}
+	if a.networkIsolation && oldPolicyExists {
+		if err := a.deletePublishedIngressPolicy(ctx, resolved); err != nil {
+			return fmt.Errorf("renamed container but unable to delete old published-port isolation policy %q: %w", oldPolicyName, err)
+		}
+	}
+	if dnsService != nil {
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("renamed container but unable to delete old DNS service %q: %w", resolved, err)
+		}
+	}
+	if publishedService != nil {
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, oldPublishedName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("renamed container but unable to delete old published service %q: %w", oldPublishedName, err)
+		}
 	}
 
 	return nil

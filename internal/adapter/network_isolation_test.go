@@ -943,3 +943,119 @@ func TestStartupReconcilesLivePodMembershipFromDeployment(t *testing.T) {
 		t.Fatalf("live Pod membership annotation was not reconciled: %q", got.Annotations[types.AnnotationNetworkIDs])
 	}
 }
+
+
+func TestRenameContainerRewritesOwnedResourcesAndIsolationPolicy(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("old-name", network.ID)
+	deployment.UID = "old-uid"
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "old-name", Image: "image:1"}}
+	dns := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-name", Namespace: "d2k-workloads", Labels: managedLabels("old-name")},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "old-name"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	published := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("old-name"), Namespace: "d2k-workloads", Labels: managedLabels("old-name")},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer,
+			Selector: map[string]string{"app": "old-name"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, dns, published)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+	tcp := corev1.ProtocolTCP
+	p := intstr.FromInt(80)
+	if err := a.ensurePublishedIngressPolicy(ctx, "old-name", []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &p}}); err != nil {
+		t.Fatalf("old published policy: %v", err)
+	}
+
+	if err := a.RenameContainer(ctx, "old-name", "new_name"); err != nil {
+		t.Fatalf("RenameContainer: %v", err)
+	}
+
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "old-name", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("old deployment still exists: %v", err)
+	}
+	got, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "new-name", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("new deployment missing: %v", err)
+	}
+	if got.Spec.Selector.MatchLabels["app"] != "new-name" || got.Spec.Template.Labels["app"] != "new-name" {
+		t.Fatalf("renamed deployment selectors were not rewritten: %#v %#v", got.Spec.Selector.MatchLabels, got.Spec.Template.Labels)
+	}
+	if got.Labels[types.LabelWorkloadName] != "new-name" || got.Spec.Template.Labels[types.LabelWorkloadName] != "new-name" {
+		t.Fatalf("renamed workload-name labels were not rewritten")
+	}
+	if got.Spec.Template.Labels[networkLabelKey(network.ID)] != "true" || got.Annotations[types.AnnotationNetworkIDs] != encodeNetworkIDs([]string{network.ID}) {
+		t.Fatalf("network isolation metadata was not preserved across rename")
+	}
+	if len(got.Spec.Template.Spec.Containers) != 1 || got.Spec.Template.Spec.Containers[0].Name != "new-name" {
+		t.Fatalf("pod container identity was not rewritten: %#v", got.Spec.Template.Spec.Containers)
+	}
+
+	newDNS, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "new-name", metav1.GetOptions{})
+	if err != nil || newDNS.Spec.Selector["app"] != "new-name" {
+		t.Fatalf("renamed DNS service wrong: %#v %v", newDNS, err)
+	}
+	newPublishedName := publishedServiceName("new-name")
+	newPublished, err := a.client.CoreV1().Services(a.namespace).Get(ctx, newPublishedName, metav1.GetOptions{})
+	if err != nil || newPublished.Spec.Selector["app"] != "new-name" {
+		t.Fatalf("renamed published service wrong: %#v %v", newPublished, err)
+	}
+	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("new-name"), metav1.GetOptions{}); err != nil {
+		t.Fatalf("renamed published policy missing: %v", err)
+	}
+	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("old-name"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("old published policy still exists: %v", err)
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "old-name", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("old DNS service still exists: %v", err)
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName("old-name"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("old published service still exists: %v", err)
+	}
+}
+
+func TestStartContainerRejectsSwarmManagedDeployment(t *testing.T) {
+	ctx := context.Background()
+	deployment := managedDeployment("swarm-owned")
+	replicas := int32(0)
+	deployment.Spec.Replicas = &replicas
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	a := newIsolationTestAdapter(deployment)
+
+	err := a.StartContainer(ctx, deployment.Name)
+	if err == nil || !strings.Contains(err.Error(), "managed by swarm") {
+		t.Fatalf("expected Swarm ownership rejection, got %v", err)
+	}
+	got, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatalf("get deployment: %v", getErr)
+	}
+	if got.Spec.Replicas == nil || *got.Spec.Replicas != 0 {
+		t.Fatalf("Swarm-owned deployment was scaled by docker start")
+	}
+}
+
+func TestRenameContainerRejectsSwarmManagedDeployment(t *testing.T) {
+	ctx := context.Background()
+	deployment := managedDeployment("swarm-owned")
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	a := newIsolationTestAdapter(deployment)
+
+	err := a.RenameContainer(ctx, deployment.Name, "renamed")
+	if err == nil || !strings.Contains(err.Error(), "managed by swarm") {
+		t.Fatalf("expected Swarm ownership rejection, got %v", err)
+	}
+	if _, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "renamed", metav1.GetOptions{}); !apierrors.IsNotFound(getErr) {
+		t.Fatalf("renamed Swarm deployment unexpectedly exists: %v", getErr)
+	}
+}
