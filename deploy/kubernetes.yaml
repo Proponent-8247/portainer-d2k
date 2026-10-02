@@ -66,6 +66,11 @@ rules:
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "watch", "list", "create", "delete"]
 
+  # NetworkPolicies — required when Docker-network isolation is enabled.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   # Namespaces — read-only, used for cluster UID derivation and connectivity check
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -189,6 +194,17 @@ spec:
               value: "true"   # set to "false" to run in Docker host mode instead
             - name: D2K_LOG_LEVEL
               value: "info"
+            # Docker-network-equivalent isolation is opt-in in this generic
+            # manifest because Pod/Service CIDRs are cluster-specific. The Talos
+            # deployment kit enables it by default with real cluster CIDRs.
+            - name: D2K_NETWORK_ISOLATION
+              value: "false"
+            - name: D2K_POD_CIDRS
+              value: ""   # e.g. "10.240.0.0/16" — required when isolation=true
+            - name: D2K_SERVICE_CIDRS
+              value: ""   # e.g. "10.241.0.0/16" — required when isolation=true
+            - name: D2K_REJECT_HOST_NETWORK
+              value: "true"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
             # D2K_TLS_CERT_FILE and D2K_TLS_KEY_FILE are not set here — they
             # default to /etc/d2k/tls/tls.crt and /etc/d2k/tls/tls.key which

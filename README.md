@@ -28,7 +28,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
 | `docker volume create` | PersistentVolumeClaim |
-| `docker network create` | Synthetic (namespace network is flat) |
+| `docker network create` | Logical network persisted and enforced with NetworkPolicy when isolation is enabled |
 | `docker pull` | Acknowledged — Kubernetes pulls at schedule time |
 | `docker logs` | Kubernetes pod log stream |
 | `docker exec` | Kubernetes pod exec via SPDY |
@@ -53,7 +53,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Manager node | Control-plane node (`node-role.kubernetes.io/control-plane` or `master`) |
 | Worker node | Non-control-plane node |
 | Swarm leader | Control-plane node serving the Kubernetes API (matched by IP) |
-| Overlay network | Synthetic (namespace network is flat) |
+| Overlay network | Logical network membership; NetworkPolicy-enforced when isolation is enabled |
 
 Swarm IDs are derived deterministically from Kubernetes UIDs so they are stable across d2k restarts. The cluster identity is stored in a ConfigMap (`d2k-identity`) in the target namespace.
 
@@ -81,7 +81,7 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Configs** — configs defined in the `configs:` block and referenced by services are created as Kubernetes ConfigMaps and mounted into containers. The same name sanitisation and idempotency behaviour as secrets applies.
 
-**Networks** — networks defined in the `networks:` block are created as synthetic overlay networks. Kubernetes namespace networking is flat so no real network isolation is enforced, but the network names resolve correctly for DNS within the namespace. Networks are removed correctly when `docker stack rm` is run.
+**Networks** — networks defined in the `networks:` block are represented as Docker-compatible logical networks. With `D2K_NETWORK_ISOLATION=true`, membership is persisted and enforced through Kubernetes NetworkPolicy; multi-network and `internal: true` semantics are preserved as documented in `NETWORK-ISOLATION.md`. With isolation disabled they remain compatibility-only objects.
 
 **Volumes (standard)** — named volumes without driver options are created as PersistentVolumeClaims against the cluster's default StorageClass with `ReadWriteOnce` access mode and a default size of 1Gi. Volumes are mounted into service containers at the path specified in the service `volumes:` entry.
 
@@ -166,7 +166,7 @@ For Swarm services, `--endpoint-mode dnsrr` or any port with `mode: host` bypass
 
 ## Networking
 
-Kubernetes namespace networking is flat. All Pods in the namespace can reach each other by IP regardless of which Docker network they are assigned to. `docker network create` is accepted and returns a synthetic network, but no actual network isolation is enforced. Networks created by `docker stack deploy` are removed correctly when `docker stack rm` is run.
+When `D2K_NETWORK_ISOLATION=true`, Docker network membership is persisted, stamped onto translated Pods, and enforced by Kubernetes NetworkPolicy. Workloads that share no logical Docker network are denied lateral traffic even though they remain in one Kubernetes namespace. With isolation disabled, the original compatibility-only flat namespace behavior remains. See `NETWORK-ISOLATION.md`.
 
 ---
 
@@ -243,6 +243,8 @@ kubectl apply -f deploy/kubernetes.yaml
 
 For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 
+To enable Docker-network-equivalent isolation, also set `D2K_NETWORK_ISOLATION=true` and provide the cluster's real Pod and Service CIDRs. The manifest already includes the required namespaced NetworkPolicy RBAC. Do not pre-create the d2k workload default-deny policy during migration; d2k installs it only after its legacy-workload safety preflight succeeds.
+
 Connect Portainer or the Docker CLI to the d2k Service:
 
 ```bash
@@ -263,6 +265,10 @@ docker --context d2k service ls
 | `D2K_NAMESPACE` | `default` | Target Kubernetes namespace |
 | `D2K_PORT` | `2375` | Docker API listen port |
 | `D2K_SWARM_MODE` | `false` | Enable Swarm API emulation |
+| `D2K_NETWORK_ISOLATION` | `false` | Enforce Docker logical-network isolation using Kubernetes NetworkPolicy |
+| `D2K_POD_CIDRS` | _(empty)_ | Comma-separated Pod CIDRs; required when isolation is enabled |
+| `D2K_SERVICE_CIDRS` | _(empty)_ | Comma-separated Service CIDRs; required when isolation is enabled |
+| `D2K_REJECT_HOST_NETWORK` | `true` | Reject host-network requests while isolation is enabled |
 | `D2K_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `D2K_LOG_FORMAT` | `text` | Log format: text, json |
 | `D2K_KUBECONFIG` | _(empty)_ | Path to kubeconfig. Empty = in-cluster auth |
@@ -371,7 +377,7 @@ Additional networking features with no Kubernetes equivalent:
 ## Limitations
 
 - Bind mounts from arbitrary host paths are unreliable in multi-node clusters.
-- Network isolation is not enforced. All pods share the namespace network.
+- Docker-network isolation is enforced when `D2K_NETWORK_ISOLATION=true`; it remains compatibility-only when disabled.
 - Image metadata is synthesised. Actual image metadata lives on cluster nodes.
 - `docker stats` requires metrics-server to return real data.
 - Swarm services are scoped to a single namespace. Multi-namespace deployments require separate d2k instances.

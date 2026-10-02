@@ -1,7 +1,99 @@
-# Kit d2k network-isolation overlay
+# Docker-network-equivalent isolation
 
-Applied to upstream Portainer d2k 1.2.3 by the kit build workflow.
+d2k can preserve Docker logical-network isolation while still using Kubernetes/Cilium as the only datapath.
 
-The overlay persists Docker network definitions in Kubernetes ConfigMaps, stamps translated workloads with deterministic multi-network membership labels, and enforces those memberships with standard Kubernetes NetworkPolicy (enforced by Cilium).
+## Enablement
 
-It also adds Docker network connect/disconnect handling, fail-closed baseline policy, world egress excluding Pod/Service CIDRs, internal-network egress restrictions, published-port ingress policy, and host-network rejection by default.
+Set all of the following on the d2k server:
+
+```text
+D2K_NETWORK_ISOLATION=true
+D2K_POD_CIDRS=<comma-separated Kubernetes Pod CIDRs>
+D2K_SERVICE_CIDRS=<comma-separated Kubernetes Service CIDRs>
+D2K_REJECT_HOST_NETWORK=true
+```
+
+CIDRs are parsed and validated at startup. Invalid or missing CIDRs make d2k fail closed instead of creating an unsafe world-egress policy.
+
+The d2k ServiceAccount also needs namespaced CRUD access to `networking.k8s.io/networkpolicies`. The bundled `deploy/kubernetes.yaml` includes that RBAC permission.
+
+## Security model
+
+d2k persists each user-created Docker network as a Kubernetes ConfigMap and assigns a deterministic membership label to every translated Deployment/Pod attached to that network.
+
+For each logical Docker network, d2k reconciles a Kubernetes NetworkPolicy:
+
+- same-network ingress is allowed;
+- same-network egress is allowed;
+- DNS to CoreDNS is allowed;
+- ordinary networks receive world egress, excluding configured Pod and Service CIDRs;
+- `internal: true` networks do not receive world egress;
+- `none` receives no connectivity;
+- published ports receive a separate explicit ingress policy;
+- a namespace baseline denies ingress and egress for d2k-managed workloads unless another d2k policy allows it.
+
+Multiple Docker networks are additive: a workload attached to `frontend` and `backend` receives both membership labels and can communicate with peers on either network. Peers that share no logical network remain isolated even though all Pods are in the same Kubernetes namespace.
+
+Standard Kubernetes NetworkPolicy is used intentionally. On the Talos deployment kit, Cilium is the policy engine and remains the sole CNI.
+
+## Migration safety
+
+Enabling isolation over legacy d2k workloads is deliberately fail-closed.
+
+At startup, before installing the baseline default-deny policy, d2k checks every existing d2k-managed Deployment. Each must already contain valid network-membership annotations and matching Pod-template labels. If a legacy or inconsistent workload is found, d2k refuses to enable isolation and explains which workload must be recreated.
+
+This prevents an upgrade from silently blackholing existing workloads.
+
+The baseline default-deny policy should therefore be created by d2k itself after this preflight, not pre-applied by external deployment tooling.
+
+## Persistent reconciliation
+
+Network definitions are stored in ConfigMaps labelled `d2k.portainer.io/network-state=true`. On startup and network-list operations, d2k restores this state and reconciles the corresponding NetworkPolicies.
+
+If an isolation policy is deleted while d2k is stopped, the next restore recreates it.
+
+Corrupt persisted state causes startup/list failure rather than being silently ignored.
+
+## Docker API fidelity
+
+When isolation is enabled:
+
+- container inspect reports the logical networks actually attached to the workload;
+- Swarm service inspect reports the network IDs stored on the Deployment;
+- Swarm task responses include those network attachments;
+- network inspect reports attached d2k workloads;
+- the old per-service synthetic network workaround is disabled.
+
+This keeps Portainer's Docker/Swarm view aligned with the network membership Cilium enforces.
+
+## Lifecycle behavior
+
+`docker network rm` refuses to remove a network with active endpoints.
+
+`docker network connect` respects Swarm overlay `Attachable`; a standalone container cannot manually join a non-attachable overlay.
+
+`docker stack rm` routes service and network deletion through canonical cleanup paths so it also removes published-port policies, persisted network ConfigMaps, and network isolation policies. External networks remain because they do not carry the stack's Compose project label.
+
+Network create failures roll back partially persisted state.
+
+Published-port policies are installed only after the workload and Services have been created successfully, so failed workload creation does not leave orphan allow policies.
+
+## Explicit exceptions
+
+Host networking bypasses Pod-level NetworkPolicy and is rejected by default while isolation is enabled. Set `D2K_REJECT_HOST_NETWORK=false` only if that escape hatch is explicitly desired.
+
+`macvlan` and `ipvlan` remain unsupported because d2k does not create secondary CNI interfaces.
+
+Swarm `dnsrr` / publish-mode `host` still uses Kubernetes `hostPort` for publication. The Pod remains subject to its Docker-network policy for Pod-network traffic, but the externally published path is node-local rather than a normal Kubernetes LoadBalancer Service.
+
+## Validation
+
+The repository contains unit/regression tests for migration safety, policy reconciliation, internal/world egress, in-use deletion, attachability, cleanup, and Docker/Swarm API readback.
+
+For real-cluster validation, run:
+
+```bash
+hack/validate-network-isolation.sh
+```
+
+against a d2k Docker endpoint on the target cluster. The Talos deployment kit additionally performs its own live Cilium acceptance checks before declaring the feature production-accepted.
