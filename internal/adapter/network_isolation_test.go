@@ -315,7 +315,6 @@ func TestStackRemovalCleansNetworkAndPublishedPolicies(t *testing.T) {
 	}
 }
 
-
 func TestEmptyNetworkMembershipSurvivesRestartValidation(t *testing.T) {
 	ctx := context.Background()
 	deployment := managedDeployment("disconnected")
