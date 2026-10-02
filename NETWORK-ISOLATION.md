@@ -108,3 +108,14 @@ The internal short-name DNS Service and the externally published LoadBalancer/No
 Only ports with an actual Docker/Swarm publication are admitted by the published-port ingress policy. Merely declaring a target/container port does not open ingress.
 
 At runtime, restoring persistent network state also reconciles the baseline default-deny policy after isolation has passed its startup migration check. This repairs accidental policy deletion without weakening the migration guard.
+
+
+## Stack ownership and disconnected workloads
+
+In isolation mode, stack network ownership is taken from Docker's explicit `com.docker.stack.namespace` label rather than inferred from an underscore in the network name. This prevents `docker stack rm demo` from deleting an unrelated external network merely because it is named `demo_shared`.
+
+An explicit empty network-membership list remains empty in Docker/Swarm readback and during service updates. d2k does not silently reattach a deliberately disconnected workload to its default synthetic network.
+
+Standalone containers may join Swarm-scoped overlay networks only when those networks are attachable. This is enforced both at initial `docker run --network ...` time and on later `docker network connect` operations.
+
+`macvlan` and `ipvlan` network creation is rejected explicitly rather than presenting a compatibility object that cannot provide the requested L2 semantics.

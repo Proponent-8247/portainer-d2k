@@ -1055,7 +1055,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 				refs = append(refs, attachment.Target)
 			}
 		}
-		if err := a.applyDeploymentNetworks(ctx, target, refs, a.namespace); err != nil {
+		if err := a.applyDeploymentNetworks(ctx, target, refs, ""); err != nil {
 			return err
 		}
 	}
@@ -1713,7 +1713,14 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 	a.networksMu.RLock()
 	var networkNames []string
 	for name, network := range a.networks {
-		if network.Labels["com.docker.compose.project"] == stackName {
+		if a.networkIsolation {
+			if network.Labels["com.docker.stack.namespace"] == stackName {
+				networkNames = append(networkNames, name)
+			}
+			continue
+		}
+		if network.Labels["com.docker.stack.namespace"] == stackName ||
+			network.Labels["com.docker.compose.project"] == stackName {
 			networkNames = append(networkNames, name)
 		}
 	}
@@ -1852,10 +1859,13 @@ func serviceSpecLabels(depLabels map[string]string) map[string]string {
 // with the external IP and published port mappings.
 func (a *KubernetesDockerAdapter) swarmNetworksForDeployment(d appsv1.Deployment) []map[string]any {
 	ids := decodeNetworkIDs(d.Annotations[types.AnnotationNetworkIDs])
-	if !a.networkIsolation || len(ids) == 0 {
+	if !a.networkIsolation {
 		return []map[string]any{
 			{"Target": networkIDForName(d.Name, a.namespace), "Aliases": []string{d.Name}},
 		}
+	}
+	if len(ids) == 0 {
+		return []map[string]any{}
 	}
 	networks := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
@@ -1978,7 +1988,11 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 	}
 
 	serviceNetworks := a.swarmNetworksForDeployment(d)
-	primaryNetworkID := primarySwarmNetworkID(serviceNetworks, networkIDForName(d.Name, a.namespace))
+	fallbackNetworkID := networkIDForName(d.Name, a.namespace)
+	if a.networkIsolation {
+		fallbackNetworkID = ""
+	}
+	primaryNetworkID := primarySwarmNetworkID(serviceNetworks, fallbackNetworkID)
 
 	return map[string]any{
 		"ID":        serviceID,
@@ -2074,7 +2088,7 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 	// VirtualIPs: Portainer reads Endpoint.VirtualIPs[].Addr to display the
 	// service IP in the services list. Use the external LB IP if available.
 	virtualIPs := []any{}
-	if externalIP != "" {
+	if externalIP != "" && networkID != "" {
 		// Docker CLI parses VirtualIPs[].Addr with netip.ParsePrefix so it
 		// must be CIDR notation. Use /32 for IPv4, /128 for IPv6.
 		cidr := externalIP + "/32"

@@ -364,6 +364,22 @@ func (a *KubernetesDockerAdapter) findNetwork(ctx context.Context, ref string) (
 	return nil, fmt.Errorf("Docker network %q does not exist", ref)
 }
 
+func (a *KubernetesDockerAdapter) validateManualNetworkRefs(ctx context.Context, refs []string, defaultRef string) error {
+	if len(refs) == 0 && defaultRef != "" {
+		refs = []string{defaultRef}
+	}
+	for _, ref := range refs {
+		network, err := a.findNetwork(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if network.Scope == "swarm" && !network.Attachable {
+			return fmt.Errorf("network %q is not manually attachable", network.Name)
+		}
+	}
+	return nil
+}
+
 func (a *KubernetesDockerAdapter) networkMembership(ctx context.Context, refs []string, defaultRef string) (map[string]string, []string, error) {
 	if len(refs) == 0 && defaultRef != "" {
 		refs = []string{defaultRef}
@@ -700,12 +716,12 @@ func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef
 		return nil
 	}
 
+	if err := a.validateManualNetworkRefs(ctx, []string{networkRef}, ""); err != nil {
+		return err
+	}
 	network, err := a.findNetwork(ctx, networkRef)
 	if err != nil {
 		return err
-	}
-	if network.Scope == "swarm" && !network.Attachable {
-		return fmt.Errorf("network %q is not manually attachable", network.Name)
 	}
 
 	resolved, err := a.resolveDeploymentName(ctx, containerName)
@@ -717,7 +733,10 @@ func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef
 		return err
 	}
 
-	ids := decodeNetworkIDs(deployment.Annotations[types.AnnotationNetworkIDs])
+	ids, err := parseNetworkIDs(deployment.Annotations[types.AnnotationNetworkIDs])
+	if err != nil {
+		return fmt.Errorf("container %q has invalid network metadata: %w", resolved, err)
+	}
 	if containsString(ids, network.ID) {
 		return nil
 	}
@@ -747,7 +766,10 @@ func (a *KubernetesDockerAdapter) DisconnectNetwork(ctx context.Context, network
 	if err != nil {
 		return err
 	}
-	current := decodeNetworkIDs(deployment.Annotations[types.AnnotationNetworkIDs])
+	current, err := parseNetworkIDs(deployment.Annotations[types.AnnotationNetworkIDs])
+	if err != nil {
+		return fmt.Errorf("container %q has invalid network metadata: %w", resolved, err)
+	}
 	if !containsString(current, network.ID) {
 		return fmt.Errorf("container %q is not connected to network %q", resolved, network.Name)
 	}

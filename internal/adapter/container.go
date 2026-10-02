@@ -91,6 +91,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
 	if a.networkIsolation {
+		if err := a.validateManualNetworkRefs(ctx, opts.Networks, "bridge"); err != nil {
+			return "", warnings, err
+		}
 		if err := a.applyDeploymentNetworks(ctx, deployment, opts.Networks, "bridge"); err != nil {
 			return "", warnings, err
 		}

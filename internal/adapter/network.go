@@ -68,10 +68,15 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		types.LabelManagedBy:    types.LabelManagedByValue,
 		types.LabelWorkloadName: opts.Name,
 	}
-	// Synthesise Compose labels if the name matches <project>_<network> pattern.
-	if idx := strings.LastIndex(opts.Name, "_"); idx != -1 {
-		labels["com.docker.compose.network"] = opts.Name[idx+1:]
-		labels["com.docker.compose.project"] = opts.Name[:idx]
+	// Preserve the old synthetic Compose-label compatibility only when
+	// isolation is disabled. In isolation mode stack ownership must come from
+	// explicit Docker labels; inferring it from <project>_<network> can cause an
+	// unrelated external network to be deleted by docker stack rm.
+	if !a.networkIsolation {
+		if idx := strings.LastIndex(opts.Name, "_"); idx != -1 {
+			labels["com.docker.compose.network"] = opts.Name[idx+1:]
+			labels["com.docker.compose.project"] = opts.Name[:idx]
+		}
 	}
 	for k, v := range opts.Labels {
 		labels[k] = v
@@ -84,6 +89,10 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 	driver := strings.TrimSpace(opts.Driver)
 	if driver == "" {
 		driver = "overlay"
+	}
+	switch driver {
+	case "macvlan", "ipvlan":
+		return nil, warnings, fmt.Errorf("network driver %q is not supported by d2k", driver)
 	}
 	scope := "local"
 	if driver == "overlay" {

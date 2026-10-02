@@ -419,3 +419,100 @@ func TestValidationRejectsStaleNetworkLabels(t *testing.T) {
 		t.Fatalf("expected stale network metadata rejection, got %v", err)
 	}
 }
+
+
+func TestCreateContainerRejectsNonAttachableOverlay(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("locked-overlay", false, false)
+	a := newIsolationTestAdapter()
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	_, _, err := a.CreateContainer(ctx, RunOptions{
+		Name:     "standalone",
+		Image:    "example.invalid/test:1",
+		Networks: []string{network.Name},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not manually attachable") {
+		t.Fatalf("expected initial non-attachable overlay rejection, got %v", err)
+	}
+}
+
+func TestConnectNetworkRejectsCorruptMembership(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("web", network.ID)
+	deployment.Annotations[types.AnnotationNetworkIDs] = "{broken"
+	deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = "{broken"
+	a := newIsolationTestAdapter(deployment)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	err := a.ConnectNetwork(ctx, network.Name, deployment.Name)
+	if err == nil || !strings.Contains(err.Error(), "invalid network metadata") {
+		t.Fatalf("expected corrupt membership rejection, got %v", err)
+	}
+}
+
+func TestSwarmReadbackPreservesExplicitEmptyMembership(t *testing.T) {
+	a := newIsolationTestAdapter()
+	deployment := managedDeployment("disconnected")
+	deployment.Annotations[types.AnnotationNetworkIDs] = "[]"
+	deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = "[]"
+
+	networks := a.swarmNetworksForDeployment(*deployment)
+	if len(networks) != 0 {
+		t.Fatalf("explicitly disconnected service gained synthetic network readback: %#v", networks)
+	}
+}
+
+func TestStackRemovalKeepsExternalUnderscoreNetwork(t *testing.T) {
+	ctx := context.Background()
+	stackNetwork := testNetwork("demo_default", false, false)
+	stackNetwork.Labels["com.docker.stack.namespace"] = "demo"
+	external := testNetwork("demo_shared", false, true)
+
+	deployment := managedDeployment("demo-web", stackNetwork.ID)
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmStack] = "demo"
+	deployment.Labels[types.LabelSwarmService] = "demo-web"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Labels[types.LabelSwarmStack] = "demo"
+
+	a := newIsolationTestAdapter(deployment)
+	for _, network := range []*NetworkSummary{stackNetwork, external} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+		if err := a.ensureNetworkIsolationPolicy(ctx, network); err != nil {
+			t.Fatalf("ensureNetworkIsolationPolicy(%s): %v", network.Name, err)
+		}
+	}
+
+	if err := a.SwarmDeleteStack(ctx, "demo"); err != nil {
+		t.Fatalf("SwarmDeleteStack: %v", err)
+	}
+
+	if _, err := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, networkStateName(stackNetwork.ID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stack-owned network state still exists: %v", err)
+	}
+	if _, err := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, networkStateName(external.ID), metav1.GetOptions{}); err != nil {
+		t.Fatalf("external underscore network was incorrectly removed: %v", err)
+	}
+}
+
+func TestIsolationRejectsMacvlanAndIPvlan(t *testing.T) {
+	ctx := context.Background()
+	a := newIsolationTestAdapter()
+	for _, driver := range []string{"macvlan", "ipvlan"} {
+		if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "bad-" + driver, Driver: driver}); err == nil {
+			t.Fatalf("unsupported driver %q was accepted", driver)
+		}
+	}
+}
