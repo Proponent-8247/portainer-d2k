@@ -1062,7 +1062,6 @@ func TestRenameContainerRejectsSwarmManagedDeployment(t *testing.T) {
 	}
 }
 
-
 func TestStopAndRemoveFailClosedOnOwnershipLookupError(t *testing.T) {
 	ctx := context.Background()
 
