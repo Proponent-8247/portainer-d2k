@@ -97,3 +97,14 @@ hack/validate-network-isolation.sh
 ```
 
 against a d2k Docker endpoint on the target cluster. The Talos deployment kit additionally performs its own live Cilium acceptance checks before declaring the feature production-accepted.
+
+
+## Additional lifecycle guarantees
+
+A workload may be deliberately disconnected from every logical network. d2k records that as an explicit empty membership list (`[]`); restart validation accepts it and the baseline default-deny keeps the workload isolated.
+
+The internal short-name DNS Service and the externally published LoadBalancer/NodePort Service use different Kubernetes object names, so publishing a port cannot collide with the Service used for container-name DNS.
+
+Only ports with an actual Docker/Swarm publication are admitted by the published-port ingress policy. Merely declaring a target/container port does not open ingress.
+
+At runtime, restoring persistent network state also reconciles the baseline default-deny policy after isolation has passed its startup migration check. This repairs accidental policy deletion without weakening the migration guard.

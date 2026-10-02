@@ -73,7 +73,7 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Services** — all services in a stack are translated to Kubernetes Deployments. `deploy.replicas` is honoured. Services with no explicit `deploy.replicas` default to 1 replica. Image, environment variables, port mappings, and restart policies are all translated correctly.
 
-**Ports** — `ports` mappings create a LoadBalancer Service. Both `<host>:<container>` and short-form syntax are supported.
+**Ports** — `ports` mappings create a LoadBalancer Service. Both `<host>:<container>` and short-form syntax are supported. The published Service uses a distinct Kubernetes name from the internal short-name DNS Service, avoiding object-name collisions.
 
 **dnsrr / host-port mode** — services using `--endpoint-mode dnsrr` or any port with `mode: host` are translated to hostPort bindings on the pod spec rather than a LoadBalancer Service. Pods bind directly on the node's network interface at the published port, and the service endpoint returns the individual node IPs of running pods rather than a VIP. This allows an external load balancer to target cluster nodes directly, bypassing the Kubernetes service routing layer. The endpoint node IP list updates automatically as pods are scheduled or rescheduled.
 
@@ -377,6 +377,7 @@ Additional networking features with no Kubernetes equivalent:
 ## Limitations
 
 - Bind mounts from arbitrary host paths are unreliable in multi-node clusters.
+- Docker network-scoped DNS aliases are not a complete replacement for Docker's embedded DNS. The isolation layer preserves network membership/security, but two stacks that rely on the same bare service alias in one Kubernetes namespace can still collide at the DNS-Service layer.
 - Docker-network isolation is enforced when `D2K_NETWORK_ISOLATION=true`; it remains compatibility-only when disabled.
 - Image metadata is synthesised. Actual image metadata lives on cluster nodes.
 - `docker stats` requires metrics-server to return real data.
