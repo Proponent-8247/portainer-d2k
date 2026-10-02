@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -311,5 +312,111 @@ func TestStackRemovalCleansNetworkAndPublishedPolicies(t *testing.T) {
 	}
 	if _, err := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, networkStateName(network.ID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("network state still exists after stack removal: %v", err)
+	}
+}
+
+
+func TestEmptyNetworkMembershipSurvivesRestartValidation(t *testing.T) {
+	ctx := context.Background()
+	deployment := managedDeployment("disconnected")
+	deployment.Annotations[types.AnnotationNetworkIDs] = "[]"
+	deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = "[]"
+	a := newIsolationTestAdapter(deployment)
+
+	if err := a.reconcileIsolationState(ctx); err != nil {
+		t.Fatalf("valid disconnected workload was rejected: %v", err)
+	}
+	if !a.isolationReady {
+		t.Fatal("isolation was not marked ready")
+	}
+}
+
+func TestRuntimeRestoreRepairsDeletedBaseline(t *testing.T) {
+	ctx := context.Background()
+	deployment := managedDeployment("disconnected")
+	deployment.Annotations[types.AnnotationNetworkIDs] = "[]"
+	deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = "[]"
+	a := newIsolationTestAdapter(deployment)
+	if err := a.reconcileIsolationState(ctx); err != nil {
+		t.Fatalf("reconcileIsolationState: %v", err)
+	}
+	if err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Delete(ctx, "d2k-workloads-default-deny", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete baseline: %v", err)
+	}
+	if err := a.restorePersistedNetworks(ctx); err != nil {
+		t.Fatalf("restorePersistedNetworks: %v", err)
+	}
+	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, "d2k-workloads-default-deny", metav1.GetOptions{}); err != nil {
+		t.Fatalf("baseline was not reconciled: %v", err)
+	}
+}
+
+func TestPublishedServiceNameDoesNotCollideWithDNSService(t *testing.T) {
+	for _, name := range []string{"web", "123-web", strings.Repeat("a", 63)} {
+		published := publishedServiceName(name)
+		if published == name {
+			t.Fatalf("published service name %q collides with DNS service for %q", published, name)
+		}
+		if len(published) > 63 {
+			t.Fatalf("published service name exceeds DNS label limit: %q", published)
+		}
+	}
+}
+
+func TestCreateContainerCanCreateDNSAndPublishedServices(t *testing.T) {
+	ctx := context.Background()
+	a := newIsolationTestAdapter()
+	_, _, err := a.CreateContainer(ctx, RunOptions{
+		Name:         "web",
+		Image:        "example.invalid/web:1",
+		PortBindings: []string{"8080:80"},
+	})
+	if err != nil {
+		t.Fatalf("CreateContainer with published port: %v", err)
+	}
+
+	dns, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("internal DNS service missing: %v", err)
+	}
+	if dns.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Fatalf("internal DNS service has unexpected type: %s", dns.Spec.Type)
+	}
+	published, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("published service missing: %v", err)
+	}
+	if published.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Fatalf("published service has unexpected type: %s", published.Spec.Type)
+	}
+	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("web"), metav1.GetOptions{}); err != nil {
+		t.Fatalf("published ingress policy missing: %v", err)
+	}
+}
+
+func TestSwarmPublishedPolicyIgnoresUnpublishedPortEntries(t *testing.T) {
+	var spec swarmServiceSpec
+	raw := "{\"EndpointSpec\":{\"Ports\":[{\"Protocol\":\"tcp\",\"TargetPort\":8080,\"PublishedPort\":0},{\"Protocol\":\"tcp\",\"TargetPort\":8443,\"PublishedPort\":443}]}}"
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		t.Fatalf("decode test service spec: %v", err)
+	}
+	ports := swarmNetworkPolicyPorts(spec)
+	if len(ports) != 1 || ports[0].Port == nil || ports[0].Port.IntVal != 8443 {
+		t.Fatalf("unexpected published policy ports: %#v", ports)
+	}
+}
+
+func TestValidationRejectsStaleNetworkLabels(t *testing.T) {
+	ctx := context.Background()
+	deployment := managedDeployment("stale")
+	deployment.Annotations[types.AnnotationNetworkIDs] = "[]"
+	deployment.Spec.Template.Annotations[types.AnnotationNetworkIDs] = "[]"
+	deployment.Labels[types.LabelNetworkPrefix+"deadbeef"] = "true"
+	deployment.Spec.Template.Labels[types.LabelNetworkPrefix+"deadbeef"] = "true"
+	a := newIsolationTestAdapter(deployment)
+
+	err := a.reconcileIsolationState(ctx)
+	if err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("expected stale network metadata rejection, got %v", err)
 	}
 }
