@@ -1291,7 +1291,6 @@ func TestSwarmCreateFailsClosedOnBareDNSCollision(t *testing.T) {
 	}
 }
 
-
 func TestManualNetworkMutationRejectsSwarmManagedWorkload(t *testing.T) {
 	ctx := context.Background()
 	front := testNetwork("front", false, true)
