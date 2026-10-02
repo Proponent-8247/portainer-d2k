@@ -26,4 +26,9 @@ LABEL org.opencontainers.image.source="https://github.com/Proponent-8247/portain
 COPY --from=builder /build/d2k /d2k
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
+# d2k only needs the Kubernetes API and its listen sockets (>1024). Run the
+# immutable scratch image as an unprivileged numeric identity so restricted
+# Pod Security does not depend on a deployment-time override.
+USER 65532:65532
+
 ENTRYPOINT ["/d2k"]

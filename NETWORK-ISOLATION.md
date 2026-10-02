@@ -188,3 +188,8 @@ The generic Kubernetes manifest keeps the Docker API on ClusterIP and adds a `d2
 ## Membership update ordering
 
 A network replacement is applied in two phases. Before a Deployment update, live Pods are reduced to the intersection of old and desired memberships, closing any removed access without granting anything new. Only after the Deployment update succeeds are newly added memberships applied to live Pods. If the Deployment update fails, the workload remains more restricted than requested rather than receiving an uncommitted network grant.
+
+
+## Container privilege
+
+The hardened image runs as UID/GID `65532:65532`. Network isolation, Pod metadata reconciliation, and NetworkPolicy management are Kubernetes API operations authorized through RBAC; they do not require root inside the d2k container.

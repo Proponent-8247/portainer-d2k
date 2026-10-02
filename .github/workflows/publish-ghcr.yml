@@ -54,6 +54,52 @@ jobs:
           grep -q 'D2K_POD_CIDRS' deploy/kubernetes.yaml
           grep -q 'D2K_SERVICE_CIDRS' deploy/kubernetes.yaml
           grep -q 'D2K_REJECT_HOST_NETWORK' deploy/kubernetes.yaml
+          grep -q '^USER 65532:65532
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and validate release tag
+        id: release
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag='${{ inputs.image_tag }}'
+          else
+            tag="$(tr -d '[:space:]' < release/ghcr-image-tag.txt)"
+          fi
+          if [[ ! "$tag" =~ ^[0-9]+.[0-9]+.[0-9]+-kit.netiso.[0-9]+$ ]]; then
+            echo "::error::Invalid hardened d2k release tag: $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ steps.release.outputs.tag }}
+            REVISION=${{ github.sha }}
+          tags: ghcr.io/proponent-8247/portainer-d2k:${{ steps.release.outputs.tag }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Verify published manifest
+        run: docker buildx imagetools inspect "ghcr.io/proponent-8247/portainer-d2k:${{ steps.release.outputs.tag }}"
+ Dockerfile
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
