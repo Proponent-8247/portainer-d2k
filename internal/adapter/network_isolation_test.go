@@ -822,7 +822,6 @@ func TestSwarmCreateFailsClosedWhenPublishedServiceCreationFails(t *testing.T) {
 	}
 }
 
-
 func TestDisconnectPatchesLivePodMembershipBeforeRollout(t *testing.T) {
 	ctx := context.Background()
 	front := testNetwork("front", false, true)
