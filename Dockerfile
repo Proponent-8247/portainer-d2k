@@ -14,6 +14,12 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 
 FROM scratch
 
+ARG VERSION
+LABEL org.opencontainers.image.source="https://github.com/Proponent-8247/portainer-d2k" \
+      org.opencontainers.image.revision="$VERSION" \
+      org.opencontainers.image.title="portainer-d2k" \
+      org.opencontainers.image.description="Docker/Swarm-to-Kubernetes translator with Docker-network-equivalent isolation"
+
 COPY --from=builder /build/d2k /d2k
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 

@@ -233,6 +233,20 @@ If your StorageClass has `reclaimPolicy: Delete`, the underlying NFS subdirector
 
 ---
 
+## Hardened fork image release
+
+The Talos deployment kit consumes the exact GHCR build, not a mutable `latest` tag.
+
+The reviewed build line is:
+
+```text
+ghcr.io/proponent-8247/portainer-d2k:1.2.3-kit.netiso.4
+```
+
+Changing `release/ghcr-image-tag.txt` on `develop` triggers the privileged GHCR release workflow. The workflow reruns formatting/module checks, vet, unit tests, race tests, full build, and isolation manifest/harness validation before building and publishing amd64+arm64 images with SBOM/provenance metadata.
+
+Manual workflow dispatch remains available for an explicitly supplied hardened release tag. A release tag must match `<upstream-version>-kit.netiso.<revision>`.
+
 ## Deployment
 
 d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.

@@ -6,7 +6,15 @@ on:
       image_tag:
         description: "Image tag to publish"
         required: true
-        default: "1.2.3-kit.netiso.3"
+        default: "1.2.3-kit.netiso.4"
+  push:
+    branches: [develop]
+    paths:
+      - "release/ghcr-image-tag.txt"
+
+concurrency:
+  group: publish-ghcr
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -55,6 +63,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve and validate release tag
+        id: release
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag='${{ inputs.image_tag }}'
+          else
+            tag="$(tr -d '[:space:]' < release/ghcr-image-tag.txt)"
+          fi
+          if [[ ! "$tag" =~ ^[0-9]+.[0-9]+.[0-9]+-kit.netiso.[0-9]+$ ]]; then
+            echo "::error::Invalid hardened d2k release tag: $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Build and publish
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
@@ -62,6 +85,9 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ github.sha }}
-          tags: ghcr.io/proponent-8247/portainer-d2k:${{ inputs.image_tag }}
+          tags: ghcr.io/proponent-8247/portainer-d2k:${{ steps.release.outputs.tag }}
           sbom: true
           provenance: mode=max
+
+      - name: Verify published manifest
+        run: docker buildx imagetools inspect "ghcr.io/proponent-8247/portainer-d2k:${{ steps.release.outputs.tag }}"
