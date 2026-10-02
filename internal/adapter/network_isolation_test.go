@@ -791,7 +791,6 @@ func TestSwarmUpdateHostPublishingRemovesLoadBalancer(t *testing.T) {
 	}
 }
 
-
 func TestSwarmCreateFailsClosedWhenPublishedServiceCreationFails(t *testing.T) {
 	ctx := context.Background()
 	network := testNetwork("front", false, true)
