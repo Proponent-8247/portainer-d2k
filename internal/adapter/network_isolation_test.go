@@ -1323,7 +1323,6 @@ func TestManualNetworkMutationRejectsSwarmManagedWorkload(t *testing.T) {
 	}
 }
 
-
 func TestSwarmNetworkSwapDoesNotGrantNewMembershipBeforeDeploymentCommit(t *testing.T) {
 	ctx := context.Background()
 	front := testNetwork("front", false, true)
