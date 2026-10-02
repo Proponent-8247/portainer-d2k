@@ -3,9 +3,9 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
-	"fmt"
 
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
@@ -423,7 +423,6 @@ func TestValidationRejectsStaleNetworkLabels(t *testing.T) {
 	}
 }
 
-
 func TestCreateContainerRejectsNonAttachableOverlay(t *testing.T) {
 	ctx := context.Background()
 	network := testNetwork("locked-overlay", false, false)
@@ -519,7 +518,6 @@ func TestIsolationRejectsMacvlanAndIPvlan(t *testing.T) {
 		}
 	}
 }
-
 
 func TestSwarmUpdateReappliesSpecAfterConflict(t *testing.T) {
 	ctx := context.Background()
