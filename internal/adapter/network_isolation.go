@@ -738,6 +738,24 @@ func removedNetworkMembership(before, after []string) bool {
 	return false
 }
 
+// retainedNetworkMembership is the safe pre-update identity for a membership
+// replacement. It contains only networks that were already granted and remain
+// desired. New memberships are added only after the Deployment update succeeds.
+func retainedNetworkMembership(before, after []string) []string {
+	desired := map[string]bool{}
+	for _, id := range after {
+		desired[id] = true
+	}
+	var retained []string
+	for _, id := range before {
+		if desired[id] {
+			retained = append(retained, id)
+		}
+	}
+	sort.Strings(retained)
+	return retained
+}
+
 func (a *KubernetesDockerAdapter) patchExistingPodNetworks(ctx context.Context, deploymentName string, ids []string) error {
 	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s,%s=%s", deploymentName, types.LabelManagedBy, types.LabelManagedByValue),

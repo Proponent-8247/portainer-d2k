@@ -183,3 +183,8 @@ Direct Docker network connect/disconnect is rejected for Swarm-managed workloads
 ## Docker API ingress boundary
 
 The generic Kubernetes manifest keeps the Docker API on ClusterIP and adds a `d2k-api` NetworkPolicy. Only Pods explicitly labelled `d2k.portainer.io/client=true` are admitted by default. Because d2k 1.2.x does not authenticate API clients, exposing the Service as LoadBalancer/NodePort requires an explicit TLS and source-policy design.
+
+
+## Membership update ordering
+
+A network replacement is applied in two phases. Before a Deployment update, live Pods are reduced to the intersection of old and desired memberships, closing any removed access without granting anything new. Only after the Deployment update succeeds are newly added memberships applied to live Pods. If the Deployment update fails, the workload remains more restricted than requested rather than receiving an uncommitted network grant.

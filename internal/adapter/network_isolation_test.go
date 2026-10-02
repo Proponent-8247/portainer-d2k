@@ -1322,3 +1322,58 @@ func TestManualNetworkMutationRejectsSwarmManagedWorkload(t *testing.T) {
 		t.Fatalf("Swarm workload membership changed through container network API: %q", got.Annotations[types.AnnotationNetworkIDs])
 	}
 }
+
+
+func TestSwarmNetworkSwapDoesNotGrantNewMembershipBeforeDeploymentCommit(t *testing.T) {
+	ctx := context.Background()
+	front := testNetwork("front", false, true)
+	back := testNetwork("back", false, true)
+	deployment := managedDeployment("svc", front.ID)
+	deployment.UID = "service-uid"
+	deployment.Annotations[types.AnnotationSwarmServiceID] = "service-id"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "image:1"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc-pod", Namespace: "d2k-workloads",
+			Labels: map[string]string{
+				"app":                     "svc",
+				types.LabelManagedBy:      types.LabelManagedByValue,
+				networkLabelKey(front.ID): "true",
+			},
+			Annotations: map[string]string{types.AnnotationNetworkIDs: encodeNetworkIDs([]string{front.ID})},
+		},
+	}
+
+	a := newIsolationTestAdapter(deployment, pod)
+	for _, network := range []*NetworkSummary{front, back} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+	}
+	a.client.(*fake.Clientset).PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated deployment update failure")
+	})
+
+	body := strings.NewReader(`{"TaskTemplate":{"ContainerSpec":{"Image":"image:1"},"Networks":[{"Target":"` + back.ID + `"}]}}`)
+	if err := a.SwarmUpdateService(ctx, "svc", body); err == nil {
+		t.Fatal("expected Deployment update failure")
+	}
+
+	live, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get live pod: %v", err)
+	}
+	if live.Labels[networkLabelKey(front.ID)] != "" {
+		t.Fatalf("removed membership remained after pre-update restriction: %#v", live.Labels)
+	}
+	if live.Labels[networkLabelKey(back.ID)] != "" {
+		t.Fatalf("new membership was granted before Deployment commit: %#v", live.Labels)
+	}
+	if live.Annotations[types.AnnotationNetworkIDs] != "[]" {
+		t.Fatalf("live pod should retain only the intersection before failed commit, got %q", live.Annotations[types.AnnotationNetworkIDs])
+	}
+}

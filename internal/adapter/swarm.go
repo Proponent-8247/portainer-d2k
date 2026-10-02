@@ -973,10 +973,13 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 					return nil, fmt.Errorf("replacement service %q has invalid network metadata: %w", name, parseErr)
 				}
 				removedMembership = removedNetworkMembership(previousNetworkIDs, desiredNetworkIDs)
-				// Removing membership is security-reducing: close live Pod identity
-				// before changing the Deployment template.
+				// Removing membership is security-reducing. Before the Deployment
+				// update, retain only memberships that were already granted and
+				// remain desired. Never grant newly-added networks until the
+				// Deployment source of truth has committed successfully.
 				if removedMembership {
-					if patchErr := a.patchExistingPodNetworks(ctx, existing.Name, desiredNetworkIDs); patchErr != nil {
+					retained := retainedNetworkMembership(previousNetworkIDs, desiredNetworkIDs)
+					if patchErr := a.patchExistingPodNetworks(ctx, existing.Name, retained); patchErr != nil {
 						return nil, fmt.Errorf("unable to reduce live network membership for %q before update: %w", name, patchErr)
 					}
 				}
@@ -986,7 +989,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			if updateErr != nil {
 				return nil, fmt.Errorf("unable to update existing service %q: %w", name, updateErr)
 			}
-			if a.networkIsolation && !removedMembership {
+			if a.networkIsolation {
 				if patchErr := a.patchExistingPodNetworks(ctx, updated.Name, desiredNetworkIDs); patchErr != nil {
 					return nil, fmt.Errorf("service %q updated but live Pod network membership could not be reconciled: %w", name, patchErr)
 				}
@@ -1268,7 +1271,8 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 			}
 			removedMembership = removedNetworkMembership(previousNetworkIDs, desiredNetworkIDs)
 			if removedMembership {
-				if err := a.patchExistingPodNetworks(ctx, target.Name, desiredNetworkIDs); err != nil {
+				retained := retainedNetworkMembership(previousNetworkIDs, desiredNetworkIDs)
+				if err := a.patchExistingPodNetworks(ctx, target.Name, retained); err != nil {
 					return err
 				}
 			}
@@ -1276,7 +1280,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		updated, updateErr := a.client.AppsV1().Deployments(a.namespace).Update(ctx, target, metav1.UpdateOptions{})
 		err = updateErr
 		if err == nil {
-			if a.networkIsolation && spec.TaskTemplate.Networks != nil && !removedMembership {
+			if a.networkIsolation && spec.TaskTemplate.Networks != nil {
 				if podErr := a.patchExistingPodNetworks(ctx, updated.Name, desiredNetworkIDs); podErr != nil {
 					return fmt.Errorf("service %q updated but live Pod network membership could not be reconciled: %w", id, podErr)
 				}
