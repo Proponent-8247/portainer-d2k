@@ -958,7 +958,7 @@ func TestRenameContainerRewritesOwnedResourcesAndIsolationPolicy(t *testing.T) {
 		},
 	}
 	published := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("old-name"), Namespace: "d2k-workloads", Labels: managedLabels("old-name")},
+		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("old-name"), Namespace: "d2k-workloads", Labels: managedLabels("old-name"), Finalizers: []string{"service.kubernetes.io/load-balancer-cleanup"}},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeLoadBalancer,
 			Selector: map[string]string{"app": "old-name"},
@@ -1009,6 +1009,9 @@ func TestRenameContainerRewritesOwnedResourcesAndIsolationPolicy(t *testing.T) {
 	if err != nil || newPublished.Spec.Selector["app"] != "new-name" {
 		t.Fatalf("renamed published service wrong: %#v %v", newPublished, err)
 	}
+	if len(newPublished.Finalizers) != 0 {
+		t.Fatalf("renamed service copied controller finalizers from the old Service: %#v", newPublished.Finalizers)
+	}
 	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("new-name"), metav1.GetOptions{}); err != nil {
 		t.Fatalf("renamed published policy missing: %v", err)
 	}
@@ -1056,5 +1059,45 @@ func TestRenameContainerRejectsSwarmManagedDeployment(t *testing.T) {
 	}
 	if _, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "renamed", metav1.GetOptions{}); !apierrors.IsNotFound(getErr) {
 		t.Fatalf("renamed Swarm deployment unexpectedly exists: %v", getErr)
+	}
+}
+
+
+func TestStopAndRemoveFailClosedOnOwnershipLookupError(t *testing.T) {
+	ctx := context.Background()
+
+	for _, operation := range []string{"stop", "remove"} {
+		t.Run(operation, func(t *testing.T) {
+			deployment := managedDeployment("standalone")
+			replicas := int32(1)
+			deployment.Spec.Replicas = &replicas
+			a := newIsolationTestAdapter(deployment)
+			gets := 0
+			a.client.(*fake.Clientset).PrependReactor("get", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				gets++
+				if gets == 2 {
+					return true, nil, fmt.Errorf("simulated ownership lookup failure")
+				}
+				return false, nil, nil
+			})
+
+			var err error
+			if operation == "stop" {
+				err = a.StopContainer(ctx, deployment.Name)
+			} else {
+				err = a.RemoveContainer(ctx, deployment.Name)
+			}
+			if err == nil || !strings.Contains(err.Error(), "verify ownership") {
+				t.Fatalf("%s should fail closed on ownership lookup error, got %v", operation, err)
+			}
+
+			got, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+			if getErr != nil {
+				t.Fatalf("deployment was deleted after failed ownership verification: %v", getErr)
+			}
+			if got.Spec.Replicas == nil || *got.Spec.Replicas != 1 {
+				t.Fatalf("deployment was scaled after failed ownership verification")
+			}
+		})
 	}
 }

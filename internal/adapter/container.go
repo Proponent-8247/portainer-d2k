@@ -220,10 +220,13 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 		return err
 	}
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+	if getErr != nil {
+		return fmt.Errorf("unable to verify ownership of deployment %q before stop: %w", resolved, getErr)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead")
 	}
-	return a.scaleDeployment(ctx, name, 0)
+	return a.scaleDeployment(ctx, resolved, 0)
 }
 
 // StartContainer implements docker start: scales the Deployment back to 1 replica.
@@ -254,7 +257,10 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	// Refuse to remove containers that back a swarm service — the same guard
 	// Docker Swarm applies: "cannot remove a running container that is managed by swarm".
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+	if getErr != nil {
+		return fmt.Errorf("unable to verify ownership of deployment %q before remove: %w", resolved, getErr)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
 	}
 
@@ -390,6 +396,8 @@ func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID,
 		svc.Generation = 0
 		svc.CreationTimestamp = metav1.Time{}
 		svc.ManagedFields = nil
+		svc.Finalizers = nil
+		svc.OwnerReferences = nil
 		svc.Status = corev1.ServiceStatus{}
 		if svc.Labels == nil {
 			svc.Labels = map[string]string{}
@@ -442,15 +450,18 @@ func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID,
 		}
 	}
 	if newPublished != nil {
-		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, newPublished, metav1.CreateOptions{}); err != nil {
-			rollback()
-			return fmt.Errorf("unable to create renamed published service %q: %w", newPublishedName, err)
-		}
+		// Install the allow policy before exposing the replacement Service. This
+		// avoids even a small exposure window if the namespace baseline is
+		// temporarily missing or being reconciled.
 		if a.networkIsolation {
 			if err := a.ensurePublishedIngressPolicy(ctx, newName, publishedPolicyPorts); err != nil {
 				rollback()
 				return fmt.Errorf("unable to create renamed published-port isolation policy for %q: %w", newName, err)
 			}
+		}
+		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, newPublished, metav1.CreateOptions{}); err != nil {
+			rollback()
+			return fmt.Errorf("unable to create renamed published service %q: %w", newPublishedName, err)
 		}
 	}
 
