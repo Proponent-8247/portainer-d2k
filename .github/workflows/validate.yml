@@ -52,24 +52,7 @@ jobs:
           grep -q 'D2K_POD_CIDRS' deploy/kubernetes.yaml
           grep -q 'D2K_SERVICE_CIDRS' deploy/kubernetes.yaml
           grep -q 'D2K_REJECT_HOST_NETWORK' deploy/kubernetes.yaml
-          grep -q '^USER 65532:65532
-
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Unit tests
-        run: go test ./...
-
-      - name: Race tests
-        run: go test -race ./...
-
-      - name: Build
-        run: go build ./...
-
-      - name: Build container image
-        run: docker build -t d2k:validation .
- Dockerfile
+          grep -q '^USER 65532:65532$' Dockerfile
 
 
       - name: Vet
