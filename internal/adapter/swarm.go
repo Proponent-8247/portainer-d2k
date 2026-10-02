@@ -1329,6 +1329,7 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 		}
 
 		// Return one task per desired slot: real pod if available, synthetic otherwise.
+		pendingNetworks, pendingAttachments := swarmTaskNetworks(dep.Annotations[types.AnnotationNetworkIDs])
 		for slot := int32(1); slot <= desired; slot++ {
 			if p, ok := podsBySlot[slot]; ok {
 				nodeID := nodeSwarmIDs[p.Spec.NodeName]
@@ -1344,6 +1345,7 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 						"ContainerSpec": map[string]any{
 							"Image": dep.Annotations[types.AnnotationImageRef],
 						},
+						"Networks": pendingNetworks,
 					},
 					"ServiceID":    svcID,
 					"Slot":         int(slot),
@@ -1353,7 +1355,8 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 						"Message":   "",
 						"Timestamp": dep.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 					},
-					"DesiredState": "running",
+					"DesiredState":        "running",
+					"NetworksAttachments": pendingAttachments,
 				})
 			}
 		}
@@ -1830,6 +1833,46 @@ func serviceSpecLabels(depLabels map[string]string) map[string]string {
 // deploymentToSwarmService converts a Deployment to a Swarm service map,
 // looking up the associated LoadBalancer Service to populate Endpoint.Ports
 // with the external IP and published port mappings.
+func (a *KubernetesDockerAdapter) swarmNetworksForDeployment(d appsv1.Deployment) []map[string]any {
+	ids := decodeNetworkIDs(d.Annotations[types.AnnotationNetworkIDs])
+	if !a.networkIsolation || len(ids) == 0 {
+		return []map[string]any{
+			{"Target": networkIDForName(d.Name, a.namespace), "Aliases": []string{d.Name}},
+		}
+	}
+	networks := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		networks = append(networks, map[string]any{
+			"Target":  id,
+			"Aliases": []string{d.Name},
+		})
+	}
+	return networks
+}
+
+func primarySwarmNetworkID(networks []map[string]any, fallback string) string {
+	for _, network := range networks {
+		if target, ok := network["Target"].(string); ok && target != "" {
+			return target
+		}
+	}
+	return fallback
+}
+
+func swarmTaskNetworks(raw string) ([]any, []any) {
+	ids := decodeNetworkIDs(raw)
+	specNetworks := make([]any, 0, len(ids))
+	attachments := make([]any, 0, len(ids))
+	for _, id := range ids {
+		specNetworks = append(specNetworks, map[string]any{"Target": id})
+		attachments = append(attachments, map[string]any{
+			"Network":   map[string]any{"ID": id},
+			"Addresses": []string{},
+		})
+	}
+	return specNetworks, attachments
+}
+
 func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, d appsv1.Deployment) map[string]any {
 	serviceID := d.Annotations[types.AnnotationSwarmServiceID]
 	if serviceID == "" {
@@ -1917,6 +1960,9 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 		versionIndex = uint64(d.Generation)
 	}
 
+	serviceNetworks := a.swarmNetworksForDeployment(d)
+	primaryNetworkID := primarySwarmNetworkID(serviceNetworks, networkIDForName(d.Name, a.namespace))
+
 	return map[string]any{
 		"ID": serviceID,
 		"Version": map[string]any{"Index": versionIndex},
@@ -1932,9 +1978,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 				},
 				// Networks: Portainer reads TaskTemplate.Networks to populate the
 				// "Networks" panel in the service detail view.
-				"Networks": []map[string]any{
-					{"Target": networkIDForName(d.Name, a.namespace), "Aliases": []string{d.Name}},
-				},
+				"Networks": serviceNetworks,
 			},
 			"Mode": map[string]any{
 				"Replicated": map[string]any{
@@ -1942,9 +1986,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 				},
 			},
 			// Networks at the service spec level — also read by some Portainer versions.
-			"Networks": []map[string]any{
-				{"Target": networkIDForName(d.Name, a.namespace), "Aliases": []string{d.Name}},
-			},
+			"Networks": serviceNetworks,
 			// EndpointSpec.Ports: Portainer service detail reads this to render
 			// the "Published ports" panel. Populated from the LB Service if present.
 			"EndpointSpec": a.swarmServiceEndpointSpec(ctx, d.Name),
@@ -1958,7 +2000,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 			if d.Annotations[types.AnnotationEndpointMode] == "dnsrr" {
 				return a.swarmServiceEndpointDNSRR(ctx, d)
 			}
-			return a.swarmServiceEndpoint(ctx, d.Name)
+			return a.swarmServiceEndpoint(ctx, d.Name, primaryNetworkID)
 		}(),
 		"UpdateStatus": updateStatus, // nil on new services - CLI polls tasks instead
 	}
@@ -1968,7 +2010,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 // (named <service>-lb) and returns a Docker Endpoint map populated with the
 // external IP and published port mappings. Falls back to empty arrays when no
 // LB Service exists or the LB IP has not yet been assigned.
-func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name string) map[string]any {
+func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name, networkID string) map[string]any {
 	lbName := serviceName(name) + "-lb"
 	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
 	if err != nil {
@@ -2028,7 +2070,7 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 				// associate the IP with the namespace network name.
 				// NetworkID matches Spec.Networks[].Target so Portainer associates the IP
 				// with the service network in the detail panel.
-				"NetworkID": networkIDForName(name, a.namespace),
+				"NetworkID": networkID,
 				"Addr":      cidr,
 			},
 		}
@@ -2177,6 +2219,8 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, 
 
 
 func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int) map[string]any {
+	taskNetworks, taskAttachments := swarmTaskNetworks(p.Annotations[types.AnnotationNetworkIDs])
+
 	// Map pod phase + container readiness to a Swarm task state.
 	// Only report "running" when the pod is Running AND at least one
 	// container is ready - otherwise the CLI progress loop won't advance.
@@ -2236,7 +2280,7 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 				"Image": podImage(p),
 			},
 			"Placement": map[string]any{},
-			"Networks":  []any{},
+			"Networks":  taskNetworks,
 		},
 		"ServiceID":    serviceID,
 		"Slot":         slot,
@@ -2273,7 +2317,7 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 			}(),
 		},
 		"DesiredState":        "running",
-		"NetworksAttachments": []any{},
+		"NetworksAttachments": taskAttachments,
 	}
 }
 
