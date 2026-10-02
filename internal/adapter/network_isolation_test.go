@@ -617,3 +617,176 @@ func TestSwarmDeleteServiceUsesDNSOwnershipAnnotation(t *testing.T) {
 		t.Fatalf("owned DNS service still exists after service removal: %v", err)
 	}
 }
+
+
+func TestSwarmUpdateReconcilesServicesAndPublishedPolicy(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("svc", network.ID)
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "image:1"}}
+	dns := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "d2k-workloads",
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": "svc",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	lb := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("svc"), Namespace: "d2k-workloads"},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer, Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, dns, lb)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	body := strings.NewReader(`{"TaskTemplate":{"ContainerSpec":{"Image":"image:1"},"Networks":[{"Target":"` + network.ID + `"}]},"EndpointSpec":{"Mode":"vip","Ports":[{"Protocol":"tcp","TargetPort":8443,"PublishedPort":9443,"PublishMode":"ingress"}]}}`)
+	if err := a.SwarmUpdateService(ctx, "svc", body); err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+
+	gotDNS, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DNS service: %v", err)
+	}
+	if len(gotDNS.Spec.Ports) != 1 || gotDNS.Spec.Ports[0].Port != 8443 {
+		t.Fatalf("DNS service ports not reconciled: %#v", gotDNS.Spec.Ports)
+	}
+	gotLB, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName("svc"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get published service: %v", err)
+	}
+	if len(gotLB.Spec.Ports) != 1 || gotLB.Spec.Ports[0].Port != 9443 || gotLB.Spec.Ports[0].TargetPort.IntVal != 8443 {
+		t.Fatalf("published service ports not reconciled: %#v", gotLB.Spec.Ports)
+	}
+	policy, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("svc"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get published policy: %v", err)
+	}
+	if len(policy.Spec.Ingress) != 1 || len(policy.Spec.Ingress[0].Ports) != 1 || policy.Spec.Ingress[0].Ports[0].Port.IntVal != 8443 {
+		t.Fatalf("published policy ports not reconciled: %#v", policy.Spec.Ingress)
+	}
+}
+
+func TestSwarmUpdateClearsPublishedServiceAndPreservesHeadlessDNS(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("svc", network.ID)
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "image:1"}}
+	dns := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "d2k-workloads",
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": "svc",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	lb := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("svc"), Namespace: "d2k-workloads"},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer, Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, dns, lb)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+	if err := a.ensurePublishedIngressPolicy(ctx, "svc", []networkingv1.NetworkPolicyPort{{Port: intstrPtr(intstr.FromInt(80))}}); err != nil {
+		t.Fatalf("ensurePublishedIngressPolicy: %v", err)
+	}
+
+	body := strings.NewReader(`{"TaskTemplate":{"ContainerSpec":{"Image":"image:1"},"Networks":[{"Target":"` + network.ID + `"}]},"EndpointSpec":{"Mode":"vip","Ports":[]}}`)
+	if err := a.SwarmUpdateService(ctx, "svc", body); err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName("svc"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("published service still exists after clearing ports: %v", err)
+	}
+	if _, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("svc"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("published policy still exists after clearing ports: %v", err)
+	}
+	gotDNS, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get replacement DNS service: %v", err)
+	}
+	if gotDNS.Spec.ClusterIP != "None" || len(gotDNS.Spec.Ports) != 0 {
+		t.Fatalf("DNS service was not converted to headless: %#v", gotDNS.Spec)
+	}
+}
+
+func TestSwarmUpdateHostPublishingRemovesLoadBalancer(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("svc", network.ID)
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "image:1"}}
+	dns := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "d2k-workloads",
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": "svc",
+			},
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: "None", Selector: map[string]string{"app": "svc"}},
+	}
+	lb := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("svc"), Namespace: "d2k-workloads"},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer, Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, dns, lb)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	body := strings.NewReader(`{"TaskTemplate":{"ContainerSpec":{"Image":"image:1"},"Networks":[{"Target":"` + network.ID + `"}]},"EndpointSpec":{"Mode":"dnsrr","Ports":[{"Protocol":"tcp","TargetPort":80,"PublishedPort":8080,"PublishMode":"host"}]}}`)
+	if err := a.SwarmUpdateService(ctx, "svc", body); err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	got, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated deployment: %v", err)
+	}
+	if got.Annotations[types.AnnotationEndpointMode] != "dnsrr" {
+		t.Fatalf("endpoint mode annotation not updated: %#v", got.Annotations)
+	}
+	if len(got.Spec.Template.Spec.Containers[0].Ports) != 1 || got.Spec.Template.Spec.Containers[0].Ports[0].HostPort != 8080 {
+		t.Fatalf("hostPort was not reconciled: %#v", got.Spec.Template.Spec.Containers[0].Ports)
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName("svc"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("LoadBalancer service still exists in host-publish mode: %v", err)
+	}
+}

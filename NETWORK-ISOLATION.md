@@ -131,3 +131,10 @@ Swarm DNS Services are removed using the explicit `d2k.portainer.io/dns-for-depl
 
 
 The live validation harness also verifies initial attachment to non-attachable overlays is rejected, host-network escape is rejected, macvlan/ipvlan creation fails explicitly, a full disconnect remains disconnected in API readback, ordinary networks retain world egress, and internal networks do not.
+
+
+## Swarm published-port updates
+
+Swarm service updates reconcile the translated workload, its short-name DNS Service, the externally published LoadBalancer Service, hostPort/dnsrr mode, and the published-port NetworkPolicy as one ordered operation. The Deployment is updated first, Kubernetes Services are reconciled second, and the external allow policy is reconciled last. Any Service/policy reconciliation failure removes the published allow policy best-effort so the failure mode remains closed.
+
+Changing from VIP publication to dnsrr/host publication removes the LoadBalancer Service and updates the Pod hostPort bindings. Removing all declared ports removes the published Service/policy and converts the internal DNS Service to a headless Service when required.

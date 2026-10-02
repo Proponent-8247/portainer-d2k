@@ -326,6 +326,195 @@ func swarmNetworkPolicyPorts(spec swarmServiceSpec) []networkingv1.NetworkPolicy
 	return out
 }
 
+func swarmUsesHostPublishing(spec swarmServiceSpec) bool {
+	if strings.EqualFold(spec.EndpointSpec.Mode, "dnsrr") {
+		return true
+	}
+	for _, port := range spec.EndpointSpec.Ports {
+		if strings.EqualFold(port.PublishMode, "host") {
+			return true
+		}
+	}
+	return false
+}
+
+func swarmHostPorts(spec swarmServiceSpec) []corev1.ContainerPort {
+	if !swarmUsesHostPublishing(spec) {
+		return nil
+	}
+	var ports []corev1.ContainerPort
+	for _, port := range spec.EndpointSpec.Ports {
+		if port.PublishedPort <= 0 || port.TargetPort <= 0 {
+			continue
+		}
+		protocol := corev1.ProtocolTCP
+		if strings.EqualFold(port.Protocol, "udp") {
+			protocol = corev1.ProtocolUDP
+		}
+		ports = append(ports, corev1.ContainerPort{
+			ContainerPort: int32(port.TargetPort),
+			HostPort:      int32(port.PublishedPort),
+			Protocol:      protocol,
+		})
+	}
+	return ports
+}
+
+func swarmClusterServicePorts(spec swarmServiceSpec) []corev1.ServicePort {
+	var ports []corev1.ServicePort
+	for i, port := range spec.EndpointSpec.Ports {
+		if port.TargetPort <= 0 {
+			continue
+		}
+		protocol := corev1.ProtocolTCP
+		if strings.EqualFold(port.Protocol, "udp") {
+			protocol = corev1.ProtocolUDP
+		}
+		ports = append(ports, corev1.ServicePort{
+			Name:       fmt.Sprintf("port-%d", i),
+			Protocol:   protocol,
+			Port:       int32(port.TargetPort),
+			TargetPort: intstr.FromInt(port.TargetPort),
+		})
+	}
+	return ports
+}
+
+func swarmPublishedServicePorts(spec swarmServiceSpec) []corev1.ServicePort {
+	if swarmUsesHostPublishing(spec) {
+		return nil
+	}
+	var ports []corev1.ServicePort
+	for i, port := range spec.EndpointSpec.Ports {
+		if port.PublishedPort <= 0 || port.TargetPort <= 0 {
+			continue
+		}
+		protocol := corev1.ProtocolTCP
+		if strings.EqualFold(port.Protocol, "udp") {
+			protocol = corev1.ProtocolUDP
+		}
+		ports = append(ports, corev1.ServicePort{
+			Name:       fmt.Sprintf("port-%d", i),
+			Protocol:   protocol,
+			Port:       int32(port.PublishedPort),
+			TargetPort: intstr.FromInt(port.TargetPort),
+		})
+	}
+	return ports
+}
+
+func swarmDNSServiceName(specName, deploymentName string) string {
+	if idx := strings.LastIndex(specName, "_"); idx != -1 {
+		if bare := sanitiseResourceName(specName[idx+1:]); bare != "" {
+			return bare
+		}
+	}
+	return deploymentName
+}
+
+func (a *KubernetesDockerAdapter) reconcileSwarmServices(ctx context.Context, deployment appsv1.Deployment, spec swarmServiceSpec) error {
+	dnsPorts := swarmClusterServicePorts(spec)
+	dnsName := swarmDNSServiceName(spec.Name, deployment.Name)
+	services, err := a.client.CoreV1().Services(a.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to list services while reconciling %q: %w", deployment.Name, err)
+	}
+
+	var existingDNS *corev1.Service
+	for i := range services.Items {
+		service := &services.Items[i]
+		if service.Annotations["d2k.portainer.io/dns-service"] == "true" &&
+			service.Annotations["d2k.portainer.io/dns-for-deploy"] == deployment.Name {
+			existingDNS = service.DeepCopy()
+			break
+		}
+	}
+
+	desiredDNS := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dnsName,
+			Namespace: a.namespace,
+			Labels:    deployment.Labels,
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": deployment.Name,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": deployment.Name},
+			Ports:    dnsPorts,
+		},
+	}
+	if len(dnsPorts) == 0 {
+		desiredDNS.Spec.ClusterIP = "None"
+	}
+
+	if existingDNS == nil {
+		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, desiredDNS, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("unable to create DNS service %q: %w", dnsName, err)
+		}
+	} else {
+		existingHeadless := existingDNS.Spec.ClusterIP == "None"
+		desiredHeadless := desiredDNS.Spec.ClusterIP == "None"
+		if existingDNS.Name != desiredDNS.Name || existingHeadless != desiredHeadless {
+			if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, existingDNS.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("unable to replace DNS service %q: %w", existingDNS.Name, err)
+			}
+			if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, desiredDNS, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("unable to recreate DNS service %q: %w", dnsName, err)
+			}
+		} else {
+			existingDNS.Labels = desiredDNS.Labels
+			existingDNS.Annotations = desiredDNS.Annotations
+			existingDNS.Spec.Selector = desiredDNS.Spec.Selector
+			existingDNS.Spec.Ports = desiredDNS.Spec.Ports
+			if _, err := a.client.CoreV1().Services(a.namespace).Update(ctx, existingDNS, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("unable to update DNS service %q: %w", existingDNS.Name, err)
+			}
+		}
+	}
+
+	publishedName := publishedServiceName(deployment.Name)
+	publishedPorts := swarmPublishedServicePorts(spec)
+	existingPublished, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedName, metav1.GetOptions{})
+	if len(publishedPorts) == 0 {
+		if err == nil {
+			if deleteErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedName, metav1.DeleteOptions{}); deleteErr != nil && !errors.IsNotFound(deleteErr) {
+				return fmt.Errorf("unable to delete published service %q: %w", publishedName, deleteErr)
+			}
+		} else if !errors.IsNotFound(err) {
+			return fmt.Errorf("unable to inspect published service %q: %w", publishedName, err)
+		}
+		return nil
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to inspect published service %q: %w", publishedName, err)
+	}
+	if errors.IsNotFound(err) {
+		_, err = a.client.CoreV1().Services(a.namespace).Create(ctx, &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: publishedName, Namespace: a.namespace, Labels: deployment.Labels},
+			Spec: corev1.ServiceSpec{
+				Type:     corev1.ServiceTypeLoadBalancer,
+				Selector: map[string]string{"app": deployment.Name},
+				Ports:    publishedPorts,
+			},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("unable to create published service %q: %w", publishedName, err)
+		}
+		return nil
+	}
+
+	existingPublished.Labels = deployment.Labels
+	existingPublished.Spec.Type = corev1.ServiceTypeLoadBalancer
+	existingPublished.Spec.Selector = map[string]string{"app": deployment.Name}
+	existingPublished.Spec.Ports = publishedPorts
+	if _, err := a.client.CoreV1().Services(a.namespace).Update(ctx, existingPublished, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("unable to update published service %q: %w", publishedName, err)
+	}
+	return nil
+}
+
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
 // plus a LoadBalancer Service if ports are published.
 func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body io.Reader) (map[string]any, error) {
@@ -667,41 +856,10 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		}
 	}
 
-	// --- detect dnsrr / host-port mode ---
-	// Triggered by either:
-	//   EndpointSpec.Mode == "dnsrr"
-	//   Any port with PublishMode == "host"
-	// In this mode pods expose ports directly on the node via hostPort, and
-	// the service endpoint returns the individual node IPs rather than a VIP.
-	// No LoadBalancer Service is created — an external LB targets node IPs directly.
-	isDNSRR := spec.EndpointSpec.Mode == "dnsrr"
-	if !isDNSRR {
-		for _, p := range spec.EndpointSpec.Ports {
-			if strings.ToLower(p.PublishMode) == "host" {
-				isDNSRR = true
-				break
-			}
-		}
-	}
-
-	// Build hostPort container ports for dnsrr/host-port mode.
-	var hostPorts []corev1.ContainerPort
-	if isDNSRR && len(spec.EndpointSpec.Ports) > 0 {
-		for _, p := range spec.EndpointSpec.Ports {
-			if p.PublishedPort == 0 {
-				continue
-			}
-			proto := corev1.ProtocolTCP
-			if strings.ToUpper(p.Protocol) == "UDP" {
-				proto = corev1.ProtocolUDP
-			}
-			hostPorts = append(hostPorts, corev1.ContainerPort{
-				ContainerPort: int32(p.TargetPort),
-				HostPort:      int32(p.PublishedPort),
-				Protocol:      proto,
-			})
-		}
-	}
+	// dnsrr or publish-mode=host uses node-local hostPort instead of a
+	// Kubernetes LoadBalancer Service.
+	isDNSRR := swarmUsesHostPublishing(spec)
+	hostPorts := swarmHostPorts(spec)
 
 	// --- command / args ---
 	// Swarm Command = entrypoint override, Args = cmd override.
@@ -844,23 +1002,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// Build ClusterIP ports from whichever port spec is available.
 	// If no ports are declared at all we still create a headless-style ClusterIP
 	// with no ports — enough to register the DNS name.
-	var clusterIPPorts []corev1.ServicePort
-	for i, p := range spec.EndpointSpec.Ports {
-		proto := corev1.ProtocolTCP
-		if strings.ToUpper(p.Protocol) == "UDP" {
-			proto = corev1.ProtocolUDP
-		}
-		port := int32(p.TargetPort)
-		if port == 0 {
-			continue
-		}
-		clusterIPPorts = append(clusterIPPorts, corev1.ServicePort{
-			Name:       fmt.Sprintf("port-%d", i),
-			Protocol:   proto,
-			Port:       port,
-			TargetPort: intstr.FromInt(p.TargetPort),
-		})
-	}
+	clusterIPPorts := swarmClusterServicePorts(spec)
 
 	// Use a headless Service (clusterIP: None) when there are no ports.
 	// Kubernetes rejects ClusterIP Services with an empty ports list, but
@@ -881,12 +1023,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// "example-app_redis"). We register DNS using just the bare service name
 	// ("redis") so apps can connect using short names without stack prefixes.
 	// For standalone services, the name is used as-is.
-	dnsName := name
-	if idx := strings.LastIndex(spec.Name, "_"); idx != -1 {
-		if bare := sanitiseResourceName(spec.Name[idx+1:]); bare != "" {
-			dnsName = bare
-		}
-	}
+	dnsName := swarmDNSServiceName(spec.Name, name)
 
 	clusterSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -910,39 +1047,22 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// Create a LoadBalancer Service for externally published ports — but only
 	// in VIP mode. In dnsrr/host-port mode pods bind directly via hostPort and
 	// an external LB targets node IPs; no LB Service is needed or appropriate.
-	if !isDNSRR && len(spec.EndpointSpec.Ports) > 0 {
-		var lbPorts []corev1.ServicePort
-		for i, p := range spec.EndpointSpec.Ports {
-			if p.PublishedPort == 0 {
-				continue
-			}
-			proto := corev1.ProtocolTCP
-			if strings.ToUpper(p.Protocol) == "UDP" {
-				proto = corev1.ProtocolUDP
-			}
-			lbPorts = append(lbPorts, corev1.ServicePort{
-				Name:       fmt.Sprintf("port-%d", i),
-				Protocol:   proto,
-				Port:       int32(p.PublishedPort),
-				TargetPort: intstr.FromInt(p.TargetPort),
-			})
+	lbPorts := swarmPublishedServicePorts(spec)
+	if len(lbPorts) > 0 {
+		lbSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      publishedServiceName(name),
+				Namespace: a.namespace,
+				Labels:    baseLabels,
+			},
+			Spec: corev1.ServiceSpec{
+				Type:     corev1.ServiceTypeLoadBalancer,
+				Selector: map[string]string{"app": name},
+				Ports:    lbPorts,
+			},
 		}
-		if len(lbPorts) > 0 {
-			lbSvc := &corev1.Service{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      publishedServiceName(name),
-					Namespace: a.namespace,
-					Labels:    baseLabels,
-				},
-				Spec: corev1.ServiceSpec{
-					Type:     corev1.ServiceTypeLoadBalancer,
-					Selector: map[string]string{"app": name},
-					Ports:    lbPorts,
-				},
-			}
-			if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, lbSvc, metav1.CreateOptions{}); svcErr != nil {
-				warnings = append(warnings, fmt.Sprintf("d2k: unable to create LoadBalancer service for %q: %s", name, svcErr))
-			}
+		if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, lbSvc, metav1.CreateOptions{}); svcErr != nil {
+			warnings = append(warnings, fmt.Sprintf("d2k: unable to create LoadBalancer service for %q: %s", name, svcErr))
 		}
 	}
 
@@ -1029,6 +1149,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		}
 
 		cs := spec.TaskTemplate.ContainerSpec
+		endpointSpecProvided := spec.EndpointSpec.Ports != nil || spec.EndpointSpec.Mode != ""
 		if cs.Image != "" {
 			deployment.Spec.Template.Spec.Containers[0].Image = cs.Image
 			deployment.Annotations[types.AnnotationImageRef] = cs.Image
@@ -1049,6 +1170,16 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 			replicas := int32(spec.Mode.Replicated.Replicas)
 			deployment.Spec.Replicas = &replicas
 			deployment.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", replicas)
+		}
+
+		if endpointSpecProvided {
+			if swarmUsesHostPublishing(spec) {
+				deployment.Spec.Template.Spec.Containers[0].Ports = swarmHostPorts(spec)
+				deployment.Annotations[types.AnnotationEndpointMode] = "dnsrr"
+			} else {
+				deployment.Spec.Template.Spec.Containers[0].Ports = nil
+				delete(deployment.Annotations, types.AnnotationEndpointMode)
+			}
 		}
 
 		if a.networkIsolation && spec.TaskTemplate.Networks != nil {
@@ -1074,15 +1205,22 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		if err := applySpec(target); err != nil {
 			return err
 		}
-		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, target, metav1.UpdateOptions{})
+		updated, updateErr := a.client.AppsV1().Deployments(a.namespace).Update(ctx, target, metav1.UpdateOptions{})
+		err = updateErr
 		if err == nil {
-			if a.networkIsolation && spec.EndpointSpec.Ports != nil {
-				if policyErr := a.ensurePublishedIngressPolicy(ctx, target.Name, swarmNetworkPolicyPorts(spec)); policyErr != nil {
-					// If policy reconciliation fails after the workload update,
-					// remove the allow policy best-effort so the failure mode is
-					// closed rather than leaving stale published-port access.
-					_ = a.deletePublishedIngressPolicy(ctx, target.Name)
-					return fmt.Errorf("service %q updated but published-port isolation policy reconciliation failed: %w", id, policyErr)
+			endpointSpecProvided := spec.EndpointSpec.Ports != nil || spec.EndpointSpec.Mode != ""
+			if endpointSpecProvided {
+				if serviceErr := a.reconcileSwarmServices(ctx, *updated, spec); serviceErr != nil {
+					if a.networkIsolation {
+						_ = a.deletePublishedIngressPolicy(ctx, target.Name)
+					}
+					return fmt.Errorf("service %q updated but service reconciliation failed: %w", id, serviceErr)
+				}
+				if a.networkIsolation {
+					if policyErr := a.ensurePublishedIngressPolicy(ctx, target.Name, swarmNetworkPolicyPorts(spec)); policyErr != nil {
+						_ = a.deletePublishedIngressPolicy(ctx, target.Name)
+						return fmt.Errorf("service %q updated but published-port isolation policy reconciliation failed: %w", id, policyErr)
+					}
 				}
 			}
 			return nil
