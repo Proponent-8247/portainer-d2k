@@ -119,3 +119,12 @@ An explicit empty network-membership list remains empty in Docker/Swarm readback
 Standalone containers may join Swarm-scoped overlay networks only when those networks are attachable. This is enforced both at initial `docker run --network ...` time and on later `docker network connect` operations.
 
 `macvlan` and `ipvlan` network creation is rejected explicitly rather than presenting a compatibility object that cannot provide the requested L2 semantics.
+
+
+## Update and cleanup consistency
+
+Swarm service updates reapply the requested mutation after Kubernetes optimistic-concurrency conflicts instead of returning success after updating an unmodified refetched Deployment. An explicitly empty network list remains empty across those retries.
+
+Published-port policy is reconciled only after the workload update succeeds. If policy reconciliation fails, d2k removes the allow policy best-effort and returns an error so the failure mode is closed.
+
+Swarm DNS Services are removed using the explicit `d2k.portainer.io/dns-for-deploy` ownership annotation. d2k does not attempt to reconstruct a bare DNS name from a sanitised Deployment name, which is ambiguous when stack or service names contain hyphens.

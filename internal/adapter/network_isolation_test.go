@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"fmt"
 
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,7 +14,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -514,5 +517,105 @@ func TestIsolationRejectsMacvlanAndIPvlan(t *testing.T) {
 		if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "bad-" + driver, Driver: driver}); err == nil {
 			t.Fatalf("unsupported driver %q was accepted", driver)
 		}
+	}
+}
+
+
+func TestSwarmUpdateReappliesSpecAfterConflict(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("svc", network.ID)
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "old:1"}}
+	a := newIsolationTestAdapter(deployment)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	client := a.client.(*fake.Clientset)
+	conflicted := false
+	client.Fake.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicted {
+			return false, nil, nil
+		}
+		conflicted = true
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "svc", fmt.Errorf("test conflict"))
+	})
+
+	body := strings.NewReader(`{"TaskTemplate":{"ContainerSpec":{"Image":"new:2"},"Networks":[{"Target":"` + network.ID + `"}]},"Mode":{"Replicated":{"Replicas":2}}}`)
+	if err := a.SwarmUpdateService(ctx, "svc", body); err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	got, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated service: %v", err)
+	}
+	if got.Spec.Template.Spec.Containers[0].Image != "new:2" {
+		t.Fatalf("conflict retry lost image update: %q", got.Spec.Template.Spec.Containers[0].Image)
+	}
+	if got.Spec.Replicas == nil || *got.Spec.Replicas != 2 {
+		t.Fatalf("conflict retry lost replica update: %#v", got.Spec.Replicas)
+	}
+}
+
+func TestSwarmUpdateKeepsExplicitEmptyNetworkMembership(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("front", false, true)
+	deployment := managedDeployment("svc", network.ID)
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Spec.Template.Labels[types.LabelSwarmService] = "svc"
+	deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "old:1"}}
+	a := newIsolationTestAdapter(deployment)
+	a.networks[network.Name] = network
+	if err := a.persistNetwork(ctx, network); err != nil {
+		t.Fatalf("persistNetwork: %v", err)
+	}
+
+	body := strings.NewReader(`{"TaskTemplate":{"ContainerSpec":{"Image":"old:1"},"Networks":[]}}`)
+	if err := a.SwarmUpdateService(ctx, "svc", body); err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	got, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated service: %v", err)
+	}
+	if got.Annotations[types.AnnotationNetworkIDs] != "[]" {
+		t.Fatalf("empty membership was rewritten: %q", got.Annotations[types.AnnotationNetworkIDs])
+	}
+	if networks := a.swarmNetworksForDeployment(*got); len(networks) != 0 {
+		t.Fatalf("empty membership readback is not empty: %#v", networks)
+	}
+}
+
+func TestSwarmDeleteServiceUsesDNSOwnershipAnnotation(t *testing.T) {
+	ctx := context.Background()
+	deployment := managedDeployment("demo-stack-api-v2")
+	deployment.UID = "service-uid"
+	deployment.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	deployment.Labels[types.LabelSwarmService] = "demo-stack-api-v2"
+	deployment.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	dns := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "api-v2", Namespace: "d2k-workloads",
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service": "true",
+				"d2k.portainer.io/dns-for-deploy": "demo-stack-api-v2",
+			},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, dns)
+	if err := a.SwarmDeleteService(ctx, deployment.Name); err != nil {
+		t.Fatalf("SwarmDeleteService: %v", err)
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Get(ctx, dns.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned DNS service still exists after service removal: %v", err)
 	}
 }

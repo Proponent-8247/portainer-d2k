@@ -1002,7 +1002,6 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		return fmt.Errorf("invalid service update spec: %w", err)
 	}
 
-	// Resolve the Deployment by swarm service ID or name.
 	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
 	})
@@ -1011,9 +1010,9 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 	}
 
 	var target *appsv1.Deployment
-	for i, d := range deps.Items {
-		if matchesServiceID(d, id) {
-			target = &deps.Items[i]
+	for i := range deps.Items {
+		if matchesServiceID(deps.Items[i], id) {
+			target = deps.Items[i].DeepCopy()
 			break
 		}
 	}
@@ -1021,69 +1020,76 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		return fmt.Errorf("service %q not found", id)
 	}
 
-	// Apply updates - only patch the fields the spec carries.
-	cs := spec.TaskTemplate.ContainerSpec
-	if cs.Image != "" {
-		target.Spec.Template.Spec.Containers[0].Image = cs.Image
-		target.Annotations[types.AnnotationImageRef] = cs.Image
-	}
+	applySpec := func(deployment *appsv1.Deployment) error {
+		if len(deployment.Spec.Template.Spec.Containers) == 0 {
+			return fmt.Errorf("service %q has no container to update", id)
+		}
+		if deployment.Annotations == nil {
+			deployment.Annotations = map[string]string{}
+		}
 
-	if len(cs.Env) > 0 {
-		var envVars []corev1.EnvVar
-		for _, e := range cs.Env {
-			parts := strings.SplitN(e, "=", 2)
-			if len(parts) == 2 {
-				envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
+		cs := spec.TaskTemplate.ContainerSpec
+		if cs.Image != "" {
+			deployment.Spec.Template.Spec.Containers[0].Image = cs.Image
+			deployment.Annotations[types.AnnotationImageRef] = cs.Image
+		}
+
+		if cs.Env != nil {
+			envVars := make([]corev1.EnvVar, 0, len(cs.Env))
+			for _, entry := range cs.Env {
+				parts := strings.SplitN(entry, "=", 2)
+				if len(parts) == 2 {
+					envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
+				}
+			}
+			deployment.Spec.Template.Spec.Containers[0].Env = envVars
+		}
+
+		if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
+			replicas := int32(spec.Mode.Replicated.Replicas)
+			deployment.Spec.Replicas = &replicas
+			deployment.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", replicas)
+		}
+
+		if a.networkIsolation && spec.TaskTemplate.Networks != nil {
+			refs := make([]string, 0, len(spec.TaskTemplate.Networks))
+			for _, attachment := range spec.TaskTemplate.Networks {
+				if attachment.Target != "" {
+					refs = append(refs, attachment.Target)
+				}
+			}
+			// An explicitly empty Networks array means deliberately disconnected.
+			// Do not silently reattach the default network on update.
+			if err := a.applyDeploymentNetworks(ctx, deployment, refs, ""); err != nil {
+				return err
 			}
 		}
-		target.Spec.Template.Spec.Containers[0].Env = envVars
-	}
 
-	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
-		r := int32(spec.Mode.Replicated.Replicas)
-		target.Spec.Replicas = &r
-		// Cache desired replica count in annotation so ServiceInspect returns
-		// the correct value immediately, before Kubernetes propagates the update.
-		// Note: 0 is valid here — scale-to-zero is an explicit user action.
-		target.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", r)
+		delete(deployment.Annotations, "d2k.portainer.io/update-in-progress")
+		delete(deployment.Annotations, "d2k.portainer.io/update-requested")
+		return nil
 	}
-
-	if a.networkIsolation && spec.TaskTemplate.Networks != nil {
-		var refs []string
-		for _, attachment := range spec.TaskTemplate.Networks {
-			if attachment.Target != "" {
-				refs = append(refs, attachment.Target)
-			}
-		}
-		if err := a.applyDeploymentNetworks(ctx, target, refs, ""); err != nil {
-			return err
-		}
-	}
-	if a.networkIsolation && spec.EndpointSpec.Ports != nil {
-		if err := a.ensurePublishedIngressPolicy(ctx, target.Name, swarmNetworkPolicyPorts(spec)); err != nil {
-			return err
-		}
-	}
-
-	// Don't set any update annotations - let task polling drive convergence.
-	// Kubernetes reconciles the scale immediately, so all pods will be
-	// running by the time the CLI polls tasks. The progress loop exits
-	// naturally once running == replicas.
-	if target.Annotations == nil {
-		target.Annotations = map[string]string{}
-	}
-	delete(target.Annotations, "d2k.portainer.io/update-in-progress")
-	delete(target.Annotations, "d2k.portainer.io/update-requested")
 
 	for attempt := 0; attempt < 5; attempt++ {
+		if err := applySpec(target); err != nil {
+			return err
+		}
 		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, target, metav1.UpdateOptions{})
 		if err == nil {
+			if a.networkIsolation && spec.EndpointSpec.Ports != nil {
+				if policyErr := a.ensurePublishedIngressPolicy(ctx, target.Name, swarmNetworkPolicyPorts(spec)); policyErr != nil {
+					// If policy reconciliation fails after the workload update,
+					// remove the allow policy best-effort so the failure mode is
+					// closed rather than leaving stale published-port access.
+					_ = a.deletePublishedIngressPolicy(ctx, target.Name)
+					return fmt.Errorf("service %q updated but published-port isolation policy reconciliation failed: %w", id, policyErr)
+				}
+			}
 			return nil
 		}
 		if !errors.IsConflict(err) {
 			return fmt.Errorf("unable to update service %q: %w", id, err)
 		}
-		// Re-fetch on conflict and re-apply.
 		fresh, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, target.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return getErr
@@ -1092,8 +1098,23 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 	}
 	return fmt.Errorf("unable to update service %q: too many conflicts", id)
 }
+func (a *KubernetesDockerAdapter) deleteSwarmDNSService(ctx context.Context, deploymentName string) error {
+	services, err := a.client.CoreV1().Services(a.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to list DNS services for %q: %w", deploymentName, err)
+	}
+	for _, service := range services.Items {
+		if service.Annotations["d2k.portainer.io/dns-service"] != "true" ||
+			service.Annotations["d2k.portainer.io/dns-for-deploy"] != deploymentName {
+			continue
+		}
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, service.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("unable to delete DNS service %q: %w", service.Name, err)
+		}
+	}
+	return nil
+}
 
-// SwarmDeleteService removes the Deployment and any associated k8s Service.
 func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id string) error {
 	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
@@ -1118,15 +1139,11 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			return fmt.Errorf("unable to delete service deployment %q: %w", d.Name, err)
 		}
 
-		// Delete DNS service (bare name for stack services, full name for standalone).
-		dnsName := d.Name
-		if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
-			if bare := d.Name[idx+1:]; bare != "" {
-				dnsName = bare
-			}
-		}
-		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("unable to delete DNS service %q: %w", dnsName, err)
+		// DNS names are derived from the original Swarm service name and cannot
+		// be reconstructed safely from the sanitised Deployment name (hyphens are
+		// ambiguous). Delete the Service by its explicit ownership annotations.
+		if err := a.deleteSwarmDNSService(ctx, d.Name); err != nil {
+			return err
 		}
 		published := publishedServiceName(d.Name)
 		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, published, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
