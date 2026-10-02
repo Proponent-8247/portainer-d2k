@@ -308,7 +308,7 @@ func swarmNetworkPolicyPorts(spec swarmServiceSpec) []networkingv1.NetworkPolicy
 	var out []networkingv1.NetworkPolicyPort
 	seen := map[string]bool{}
 	for _, p := range spec.EndpointSpec.Ports {
-		if p.TargetPort <= 0 {
+		if p.TargetPort <= 0 || p.PublishedPort <= 0 {
 			continue
 		}
 		proto := corev1.ProtocolTCP
@@ -930,7 +930,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		if len(lbPorts) > 0 {
 			lbSvc := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      serviceName(name) + "-lb",
+					Name:      publishedServiceName(name),
 					Namespace: a.namespace,
 					Labels:    baseLabels,
 				},
@@ -1102,25 +1102,37 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 		return fmt.Errorf("unable to list deployments: %w", err)
 	}
 	for _, d := range deps.Items {
-		if matchesServiceID(d, id) {
-			// Delete the Deployment.
-			if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); err != nil {
-				return err
-			}
-			// Delete DNS service (bare name for stack services, full name for standalone).
-			dnsName := d.Name
-			if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
-				if bare := d.Name[idx+1:]; bare != "" {
-					dnsName = bare
-				}
-			}
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
-			if a.networkIsolation {
-				_ = a.deletePublishedIngressPolicy(ctx, d.Name)
-			}
-			return nil
+		if !matchesServiceID(d, id) {
+			continue
 		}
+
+		// Remove the allow policy before the workload so cleanup failures are
+		// fail-closed rather than leaving an orphan ingress exception.
+		if a.networkIsolation {
+			if err := a.deletePublishedIngressPolicy(ctx, d.Name); err != nil {
+				return fmt.Errorf("unable to delete published-port isolation policy for service %q: %w", d.Name, err)
+			}
+		}
+
+		if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("unable to delete service deployment %q: %w", d.Name, err)
+		}
+
+		// Delete DNS service (bare name for stack services, full name for standalone).
+		dnsName := d.Name
+		if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
+			if bare := d.Name[idx+1:]; bare != "" {
+				dnsName = bare
+			}
+		}
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("unable to delete DNS service %q: %w", dnsName, err)
+		}
+		published := publishedServiceName(d.Name)
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, published, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("unable to delete published service %q: %w", published, err)
+		}
+		return nil
 	}
 	return fmt.Errorf("service %q not found", id)
 }
@@ -2016,7 +2028,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 // external IP and published port mappings. Falls back to empty arrays when no
 // LB Service exists or the LB IP has not yet been assigned.
 func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name, networkID string) map[string]any {
-	lbName := serviceName(name) + "-lb"
+	lbName := publishedServiceName(name)
 	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
 	if err != nil {
 		// No LB service — return empty endpoint.
@@ -2197,7 +2209,7 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, 
 		}
 	}
 
-	lbName := serviceName(name) + "-lb"
+	lbName := publishedServiceName(name)
 	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
 	if err != nil {
 		return map[string]any{"Mode": "vip", "Ports": []any{}}
