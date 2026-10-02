@@ -168,7 +168,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		if err := a.ensurePublishedIngressPolicy(ctx, opts.Name, mappingsToNetworkPolicyPorts(mappings)); err != nil {
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(opts.Name), metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(opts.Name), metav1.DeleteOptions{})
 			return "", warnings, fmt.Errorf("unable to create published-port isolation policy for %q: %w", opts.Name, err)
 		}
 	}
@@ -193,7 +193,7 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 
 		// Look up the Service to get the LoadBalancer IP.
 		// Service name may have a "svc-" prefix if the deployment name started with a digit.
-		svcName := serviceName(d.Name)
+		svcName := publishedServiceName(d.Name)
 		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, svcName, metav1GetOptions())
 		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 			summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
@@ -242,15 +242,21 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
 	}
 
+	if a.networkIsolation {
+		if err := a.deletePublishedIngressPolicy(ctx, resolved); err != nil {
+			return fmt.Errorf("unable to delete published-port isolation policy for %q: %w", resolved, err)
+		}
+	}
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
-	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
-	if a.networkIsolation {
-		_ = a.deletePublishedIngressPolicy(ctx, resolved)
+	if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to delete DNS service %q: %w", resolved, err)
+	}
+	published := publishedServiceName(resolved)
+	if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, published, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to delete published service %q: %w", published, err)
 	}
 
 	return nil
@@ -306,7 +312,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	}
 
 	lbIP := ""
-	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(resolved), metav1GetOptions())
+	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName(resolved), metav1GetOptions())
 	if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 		lbIP = svc.Status.LoadBalancer.Ingress[0].IP
 		if lbIP == "" {
@@ -444,7 +450,7 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 		ports = append(ports, sp)
 	}
 
-	svcName := serviceName(name)
+	svcName := publishedServiceName(name)
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -458,6 +464,22 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 			Ports:    ports,
 		},
 	}, nil
+}
+
+// publishedServiceName returns a DNS-safe name for the externally published
+// Service. It is intentionally distinct from the internal DNS Service, which
+// uses the container name directly.
+func publishedServiceName(name string) string {
+	base := serviceName(name)
+	const suffix = "-lb"
+	maxBase := 63 - len(suffix)
+	if len(base) > maxBase {
+		base = strings.TrimRight(base[:maxBase], "-")
+	}
+	if base == "" {
+		base = "d2k"
+	}
+	return base + suffix
 }
 
 // serviceName returns the Kubernetes Service name for a given deployment name.
