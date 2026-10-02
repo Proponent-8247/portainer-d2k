@@ -15,6 +15,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/portainer/d2k/internal/types"
@@ -711,6 +712,56 @@ func (a *KubernetesDockerAdapter) deletePublishedIngressPolicy(ctx context.Conte
 	return err
 }
 
+func removedNetworkMembership(before, after []string) bool {
+	desired := map[string]bool{}
+	for _, id := range after {
+		desired[id] = true
+	}
+	for _, id := range before {
+		if !desired[id] {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *KubernetesDockerAdapter) patchExistingPodNetworks(ctx context.Context, deploymentName string, ids []string) error {
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s,%s=%s", deploymentName, types.LabelManagedBy, types.LabelManagedByValue),
+	})
+	if err != nil {
+		return fmt.Errorf("unable to list running pods for %q: %w", deploymentName, err)
+	}
+
+	for _, pod := range pods.Items {
+		labelPatch := map[string]any{}
+		for key := range pod.Labels {
+			if strings.HasPrefix(key, types.LabelNetworkPrefix) {
+				labelPatch[key] = nil
+			}
+		}
+		for _, id := range ids {
+			labelPatch[networkLabelKey(id)] = "true"
+		}
+		patch := map[string]any{
+			"metadata": map[string]any{
+				"labels": labelPatch,
+				"annotations": map[string]any{
+					types.AnnotationNetworkIDs: encodeNetworkIDs(ids),
+				},
+			},
+		}
+		raw, err := json.Marshal(patch)
+		if err != nil {
+			return err
+		}
+		if _, err := a.client.CoreV1().Pods(a.namespace).Patch(ctx, pod.Name, k8stypes.MergePatchType, raw, metav1.PatchOptions{}); err != nil {
+			return fmt.Errorf("unable to update live network membership for pod %q: %w", pod.Name, err)
+		}
+	}
+	return nil
+}
+
 func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef, containerName string) error {
 	if !a.networkIsolation {
 		return nil
@@ -744,8 +795,10 @@ func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef
 	if err := a.applyDeploymentNetworks(ctx, deployment, ids, ""); err != nil {
 		return err
 	}
-	_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, deployment, metav1.UpdateOptions{})
-	return err
+	if _, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, deployment, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
+	return a.patchExistingPodNetworks(ctx, resolved, ids)
 }
 
 func (a *KubernetesDockerAdapter) DisconnectNetwork(ctx context.Context, networkRef, containerName string) error {
@@ -779,6 +832,12 @@ func (a *KubernetesDockerAdapter) DisconnectNetwork(ctx context.Context, network
 		if id != network.ID {
 			ids = append(ids, id)
 		}
+	}
+	// A disconnect is security-reducing membership. Remove the live Pod
+	// identity first so policy enforcement closes before the Deployment
+	// controller begins its rollout.
+	if err := a.patchExistingPodNetworks(ctx, resolved, ids); err != nil {
+		return err
 	}
 	if err := a.applyDeploymentNetworks(ctx, deployment, ids, ""); err != nil {
 		return err

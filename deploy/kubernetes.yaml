@@ -38,7 +38,7 @@ rules:
   # Pods — for log streaming and exec
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "watch", "list"]
+    verbs: ["get", "watch", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]

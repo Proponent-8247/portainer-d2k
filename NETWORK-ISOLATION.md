@@ -141,3 +141,10 @@ Changing from VIP publication to dnsrr/host publication removes the LoadBalancer
 
 
 When a Swarm service requests VIP/ingress publication and the Kubernetes LoadBalancer Service cannot be created, isolation mode treats that as a hard create failure, removes the translated workload/DNS Service, and does not leave a published-port allow policy. The older warning-only behavior is retained only when network isolation is disabled.
+
+
+## Live membership convergence
+
+Network connect/disconnect operations update the Deployment template and patch only d2k's network-membership labels/annotation on already-running Pods. This avoids waiting for a Kubernetes rollout before Cilium sees the new security identity. Disconnect/removal changes patch live Pods before the Deployment update (fail-closed); additive connects patch live Pods after the desired Deployment update succeeds.
+
+The d2k ServiceAccount therefore requires the namespaced `patch` verb on Pods in addition to its existing read/log/exec permissions. It does not require broad Pod `update` permission.

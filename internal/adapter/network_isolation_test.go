@@ -821,3 +821,85 @@ func TestSwarmCreateFailsClosedWhenPublishedServiceCreationFails(t *testing.T) {
 		t.Fatalf("published allow policy exists despite publication failure: %v", err)
 	}
 }
+
+
+func TestDisconnectPatchesLivePodMembershipBeforeRollout(t *testing.T) {
+	ctx := context.Background()
+	front := testNetwork("front", false, true)
+	back := testNetwork("back", false, true)
+	deployment := managedDeployment("web", front.ID, back.ID)
+	deployment.UID = "container-uid"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-old-pod", Namespace: "d2k-workloads",
+			Labels: map[string]string{
+				"app":                     "web",
+				types.LabelManagedBy:      types.LabelManagedByValue,
+				networkLabelKey(front.ID): "true",
+				networkLabelKey(back.ID):  "true",
+			},
+			Annotations: map[string]string{types.AnnotationNetworkIDs: encodeNetworkIDs([]string{front.ID, back.ID})},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, pod)
+	for _, network := range []*NetworkSummary{front, back} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+	}
+
+	if err := a.DisconnectNetwork(ctx, back.Name, deployment.Name); err != nil {
+		t.Fatalf("DisconnectNetwork: %v", err)
+	}
+	got, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get patched pod: %v", err)
+	}
+	if got.Labels[networkLabelKey(back.ID)] != "" {
+		t.Fatalf("removed network label remains on live pod: %#v", got.Labels)
+	}
+	if got.Labels[networkLabelKey(front.ID)] != "true" {
+		t.Fatalf("remaining network label was lost: %#v", got.Labels)
+	}
+	if got.Annotations[types.AnnotationNetworkIDs] != encodeNetworkIDs([]string{front.ID}) {
+		t.Fatalf("live pod membership annotation is wrong: %q", got.Annotations[types.AnnotationNetworkIDs])
+	}
+}
+
+func TestConnectPatchesLivePodMembershipAfterDeploymentUpdate(t *testing.T) {
+	ctx := context.Background()
+	front := testNetwork("front", false, true)
+	back := testNetwork("back", false, true)
+	deployment := managedDeployment("web", front.ID)
+	deployment.UID = "container-uid"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-pod", Namespace: "d2k-workloads",
+			Labels: map[string]string{
+				"app":                     "web",
+				types.LabelManagedBy:      types.LabelManagedByValue,
+				networkLabelKey(front.ID): "true",
+			},
+			Annotations: map[string]string{types.AnnotationNetworkIDs: encodeNetworkIDs([]string{front.ID})},
+		},
+	}
+	a := newIsolationTestAdapter(deployment, pod)
+	for _, network := range []*NetworkSummary{front, back} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+	}
+
+	if err := a.ConnectNetwork(ctx, back.Name, deployment.Name); err != nil {
+		t.Fatalf("ConnectNetwork: %v", err)
+	}
+	got, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get patched pod: %v", err)
+	}
+	if got.Labels[networkLabelKey(front.ID)] != "true" || got.Labels[networkLabelKey(back.ID)] != "true" {
+		t.Fatalf("live pod did not gain additive network membership: %#v", got.Labels)
+	}
+}
