@@ -604,7 +604,7 @@ func TestSwarmDeleteServiceUsesDNSOwnershipAnnotation(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "api-v2", Namespace: "d2k-workloads",
 			Annotations: map[string]string{
-				"d2k.portainer.io/dns-service": "true",
+				"d2k.portainer.io/dns-service":    "true",
 				"d2k.portainer.io/dns-for-deploy": "demo-stack-api-v2",
 			},
 		},
