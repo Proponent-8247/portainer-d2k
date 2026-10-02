@@ -25,7 +25,13 @@ jobs:
 
       - name: Verify formatting
         run: |
-          test -z "$(gofmt -l .)"
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt required for:"
+            printf '%s\n' "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
 
       - name: Verify module metadata
         run: |
