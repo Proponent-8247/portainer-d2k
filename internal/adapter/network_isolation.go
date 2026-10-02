@@ -538,8 +538,8 @@ func (a *KubernetesDockerAdapter) sameNetworkPeer(id string) networkingv1.Networ
 	return networkingv1.NetworkPolicyPeer{
 		PodSelector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				types.LabelManagedBy:     types.LabelManagedByValue,
-				networkLabelKey(id): "true",
+				types.LabelManagedBy: types.LabelManagedByValue,
+				networkLabelKey(id):  "true",
 			},
 		},
 	}

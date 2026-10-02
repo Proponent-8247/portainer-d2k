@@ -1101,7 +1101,6 @@ func TestStopAndRemoveFailClosedOnOwnershipLookupError(t *testing.T) {
 	}
 }
 
-
 func TestIsolationPoliciesSelectOnlyD2KManagedPods(t *testing.T) {
 	ctx := context.Background()
 	a := newIsolationTestAdapter()
@@ -1173,15 +1172,15 @@ func TestSwarmCreateExistingReconcilesNetworksServicesAndPolicy(t *testing.T) {
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": "svc"},
-			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+			Ports:    []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
 		},
 	}
 	lb := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("svc"), Namespace: "d2k-workloads"},
 		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeLoadBalancer,
+			Type:     corev1.ServiceTypeLoadBalancer,
 			Selector: map[string]string{"app": "svc"},
-			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80)}},
+			Ports:    []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80)}},
 		},
 	}
 
