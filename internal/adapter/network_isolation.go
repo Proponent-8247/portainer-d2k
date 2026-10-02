@@ -537,7 +537,10 @@ func (a *KubernetesDockerAdapter) networkInUse(ctx context.Context, networkID st
 func (a *KubernetesDockerAdapter) sameNetworkPeer(id string) networkingv1.NetworkPolicyPeer {
 	return networkingv1.NetworkPolicyPeer{
 		PodSelector: &metav1.LabelSelector{
-			MatchLabels: map[string]string{networkLabelKey(id): "true"},
+			MatchLabels: map[string]string{
+				types.LabelManagedBy:     types.LabelManagedByValue,
+				networkLabelKey(id): "true",
+			},
 		},
 	}
 }
@@ -603,7 +606,10 @@ func (a *KubernetesDockerAdapter) ensureNetworkIsolationPolicy(ctx context.Conte
 	key := networkLabelKey(n.ID)
 	spec := networkingv1.NetworkPolicySpec{
 		PodSelector: metav1.LabelSelector{
-			MatchLabels: map[string]string{key: "true"},
+			MatchLabels: map[string]string{
+				types.LabelManagedBy: types.LabelManagedByValue,
+				key:                  "true",
+			},
 		},
 		PolicyTypes: []networkingv1.PolicyType{
 			networkingv1.PolicyTypeIngress,
@@ -699,7 +705,7 @@ func (a *KubernetesDockerAdapter) ensurePublishedIngressPolicy(ctx context.Conte
 		},
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": name},
+				MatchLabels: managedSelector(name),
 			},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{{

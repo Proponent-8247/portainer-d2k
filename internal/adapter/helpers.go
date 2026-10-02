@@ -29,6 +29,16 @@ func managedLabels(name string) map[string]string {
 	}
 }
 
+// managedSelector narrows Services and published-port policies to workloads
+// that are both named as expected and owned by d2k. Matching only "app" could
+// accidentally include an unrelated pod created in the same namespace.
+func managedSelector(name string) map[string]string {
+	return map[string]string{
+		"app":                name,
+		types.LabelManagedBy: types.LabelManagedByValue,
+	}
+}
+
 // Kubernetes label values must be 63 chars max, match [A-Za-z0-9._-]*,
 // and start/end with an alphanumeric character.
 func sanitiseLabelValue(v string) (string, bool) {

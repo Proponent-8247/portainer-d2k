@@ -71,11 +71,6 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Namespaces — read-only, used for cluster UID derivation and connectivity check
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get"]
-
   # ResourceQuotas — read-only, used to inject requests.cpu/memory when the
   # namespace quota enforces them (Docker has no concept of ResourceQuotas)
   - apiGroups: [""]
@@ -125,6 +120,12 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Namespace is cluster-scoped. Restrict startup connectivity access to the
+  # configured workload namespace. Change d2k here if you change D2K_NAMESPACE.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["d2k"]
+    verbs: ["get"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
@@ -222,12 +223,14 @@ spec:
               memory: "128Mi"
 
 ---
-# OPTION A — LoadBalancer Service
-# Use this when your cluster has a cloud load balancer controller or a bare-metal
-# equivalent (e.g. MetalLB). The controller assigns an external IP automatically.
-# Connect Portainer to: tcp://<EXTERNAL-IP>:2375 (no TLS) or tcp://<EXTERNAL-IP>:2376 (TLS)
+# SAFE DEFAULT — ClusterIP Service
+# d2k 1.2.x does not authenticate Docker API clients. Keep the API cluster-local
+# unless you deliberately add TLS and a restricted external exposure policy.
+# Connect an in-cluster client to: tcp://d2k.d2k.svc.cluster.local:2375
 # Update the port value below to 2376 if TLS is configured.
-# Delete this section if you are using the NodePort option below.
+#
+# To expose d2k externally, change this Service deliberately to LoadBalancer or
+# NodePort only after adding TLS and source/network-policy restrictions.
 apiVersion: v1
 kind: Service
 metadata:
@@ -242,7 +245,7 @@ spec:
     - name: docker-api
       port: 2375
       targetPort: 2375
-  type: LoadBalancer
+  type: ClusterIP
 
 ---
 # OPTION B — NodePort Service

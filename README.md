@@ -403,3 +403,10 @@ Additional networking features with no Kubernetes equivalent:
 - `docker swarm init` and `docker swarm leave` return `501 Not Implemented`.
 - Global mode services (`--mode global`) are deployed as replicated with a warning.
 - NFS volumes require `nfs.csi.k8s.io` with a matching StorageClass. Other NFS provisioners are not auto-detected.
+
+
+### Security of the bundled Kubernetes manifest
+
+The bundled Kubernetes manifest now defaults the d2k API Service to `ClusterIP`. d2k 1.2.x provides server TLS but does not authenticate Docker API clients, so external `LoadBalancer` or `NodePort` exposure must be an explicit operator decision with TLS and source/network-policy restrictions.
+
+The manifest also grants the startup Namespace read through the cluster-scoped read-only ClusterRole (restricted to the configured `d2k` namespace); a namespaced Role cannot authorize access to the cluster-scoped Namespace resource.

@@ -441,7 +441,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmServices(ctx context.Context, de
 			},
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"app": deployment.Name},
+			Selector: managedSelector(deployment.Name),
 			Ports:    dnsPorts,
 		},
 	}
@@ -507,7 +507,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmServices(ctx context.Context, de
 
 	existingPublished.Labels = deployment.Labels
 	existingPublished.Spec.Type = corev1.ServiceTypeLoadBalancer
-	existingPublished.Spec.Selector = map[string]string{"app": deployment.Name}
+	existingPublished.Spec.Selector = managedSelector(deployment.Name)
 	existingPublished.Spec.Ports = publishedPorts
 	if _, err := a.client.CoreV1().Services(a.namespace).Update(ctx, existingPublished, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("unable to update published service %q: %w", publishedName, err)
@@ -960,9 +960,42 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			if existing.Annotations[types.AnnotationSwarmServiceID] != "" {
 				deployment.Annotations[types.AnnotationSwarmServiceID] = existing.Annotations[types.AnnotationSwarmServiceID]
 			}
+
+			var desiredNetworkIDs []string
+			removedMembership := false
+			if a.networkIsolation {
+				previousNetworkIDs, parseErr := parseNetworkIDs(existing.Annotations[types.AnnotationNetworkIDs])
+				if parseErr != nil {
+					return nil, fmt.Errorf("existing service %q has invalid network metadata: %w", name, parseErr)
+				}
+				desiredNetworkIDs, parseErr = parseNetworkIDs(deployment.Annotations[types.AnnotationNetworkIDs])
+				if parseErr != nil {
+					return nil, fmt.Errorf("replacement service %q has invalid network metadata: %w", name, parseErr)
+				}
+				removedMembership = removedNetworkMembership(previousNetworkIDs, desiredNetworkIDs)
+				// Removing membership is security-reducing: close live Pod identity
+				// before changing the Deployment template.
+				if removedMembership {
+					if patchErr := a.patchExistingPodNetworks(ctx, existing.Name, desiredNetworkIDs); patchErr != nil {
+						return nil, fmt.Errorf("unable to reduce live network membership for %q before update: %w", name, patchErr)
+					}
+				}
+			}
+
 			updated, updateErr := a.client.AppsV1().Deployments(a.namespace).Update(ctx, deployment, metav1.UpdateOptions{})
 			if updateErr != nil {
 				return nil, fmt.Errorf("unable to update existing service %q: %w", name, updateErr)
+			}
+			if a.networkIsolation && !removedMembership {
+				if patchErr := a.patchExistingPodNetworks(ctx, updated.Name, desiredNetworkIDs); patchErr != nil {
+					return nil, fmt.Errorf("service %q updated but live Pod network membership could not be reconciled: %w", name, patchErr)
+				}
+			}
+			if serviceErr := a.reconcileSwarmServices(ctx, *updated, spec); serviceErr != nil {
+				if a.networkIsolation {
+					_ = a.deletePublishedIngressPolicy(ctx, name)
+				}
+				return nil, fmt.Errorf("service %q updated but service reconciliation failed: %w", name, serviceErr)
 			}
 			serviceID := updated.Annotations[types.AnnotationSwarmServiceID]
 			if serviceID == "" {
@@ -970,6 +1003,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			}
 			if a.networkIsolation {
 				if policyErr := a.ensurePublishedIngressPolicy(ctx, name, swarmNetworkPolicyPorts(spec)); policyErr != nil {
+					_ = a.deletePublishedIngressPolicy(ctx, name)
 					return nil, fmt.Errorf("unable to reconcile published-port isolation policy for %q: %w", name, policyErr)
 				}
 			}
@@ -1009,7 +1043,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// headless Services are allowed without ports and still register the DNS
 	// name so short-name resolution (e.g. "redis") works from other pods.
 	clusterSvcSpec := corev1.ServiceSpec{
-		Selector: map[string]string{"app": name},
+		Selector: managedSelector(name),
 		Ports:    clusterIPPorts,
 	}
 	if len(clusterIPPorts) == 0 {
@@ -1874,21 +1908,27 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 		}
 	}
 
-	secrets, _ := a.client.CoreV1().Secrets(a.namespace).List(ctx, metav1.ListOptions{
+	secrets, err := a.client.CoreV1().Secrets(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmStack + "=" + stackName,
 	})
-	if secrets != nil {
-		for _, secret := range secrets.Items {
-			_ = a.client.CoreV1().Secrets(a.namespace).Delete(ctx, secret.Name, metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to list secrets for stack %q: %w", stackName, err)
+	}
+	for _, secret := range secrets.Items {
+		if err := a.client.CoreV1().Secrets(a.namespace).Delete(ctx, secret.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("unable to delete secret %q from stack %q: %w", secret.Name, stackName, err)
 		}
 	}
 
-	configMaps, _ := a.client.CoreV1().ConfigMaps(a.namespace).List(ctx, metav1.ListOptions{
+	configMaps, err := a.client.CoreV1().ConfigMaps(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmStack + "=" + stackName,
 	})
-	if configMaps != nil {
-		for _, configMap := range configMaps.Items {
-			_ = a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, configMap.Name, metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to list configs for stack %q: %w", stackName, err)
+	}
+	for _, configMap := range configMaps.Items {
+		if err := a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, configMap.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("unable to delete config %q from stack %q: %w", configMap.Name, stackName, err)
 		}
 	}
 

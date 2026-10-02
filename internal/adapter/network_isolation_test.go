@@ -1100,3 +1100,158 @@ func TestStopAndRemoveFailClosedOnOwnershipLookupError(t *testing.T) {
 		})
 	}
 }
+
+
+func TestIsolationPoliciesSelectOnlyD2KManagedPods(t *testing.T) {
+	ctx := context.Background()
+	a := newIsolationTestAdapter()
+	network := testNetwork("frontend", false, true)
+
+	if err := a.ensureNetworkIsolationPolicy(ctx, network); err != nil {
+		t.Fatalf("ensureNetworkIsolationPolicy: %v", err)
+	}
+	policy, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, networkPolicyName(network.ID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get network policy: %v", err)
+	}
+	if policy.Spec.PodSelector.MatchLabels[types.LabelManagedBy] != types.LabelManagedByValue {
+		t.Fatalf("network policy does not scope selected pods to d2k ownership: %#v", policy.Spec.PodSelector.MatchLabels)
+	}
+	if len(policy.Spec.Ingress) == 0 || len(policy.Spec.Ingress[0].From) == 0 ||
+		policy.Spec.Ingress[0].From[0].PodSelector == nil ||
+		policy.Spec.Ingress[0].From[0].PodSelector.MatchLabels[types.LabelManagedBy] != types.LabelManagedByValue {
+		t.Fatalf("same-network peer does not require d2k ownership: %#v", policy.Spec.Ingress)
+	}
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(80)
+	if err := a.ensurePublishedIngressPolicy(ctx, "web", []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}}); err != nil {
+		t.Fatalf("ensurePublishedIngressPolicy: %v", err)
+	}
+	published, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get published policy: %v", err)
+	}
+	if published.Spec.PodSelector.MatchLabels["app"] != "web" ||
+		published.Spec.PodSelector.MatchLabels[types.LabelManagedBy] != types.LabelManagedByValue {
+		t.Fatalf("published policy selector is not ownership-scoped: %#v", published.Spec.PodSelector.MatchLabels)
+	}
+}
+
+func TestSwarmCreateExistingReconcilesNetworksServicesAndPolicy(t *testing.T) {
+	ctx := context.Background()
+	front := testNetwork("front", false, true)
+	back := testNetwork("back", false, true)
+
+	existing := managedDeployment("svc", front.ID)
+	existing.UID = "existing-uid"
+	existing.Annotations[types.AnnotationSwarmServiceID] = "stable-service-id"
+	existing.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	existing.Labels[types.LabelSwarmService] = "svc"
+	existing.Spec.Template.Labels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+	existing.Spec.Template.Labels[types.LabelSwarmService] = "svc"
+	existing.Spec.Template.Spec.Containers = []corev1.Container{{Name: "svc", Image: "image:old"}}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc-old-pod", Namespace: "d2k-workloads",
+			Labels: map[string]string{
+				"app":                     "svc",
+				types.LabelManagedBy:      types.LabelManagedByValue,
+				networkLabelKey(front.ID): "true",
+			},
+			Annotations: map[string]string{types.AnnotationNetworkIDs: encodeNetworkIDs([]string{front.ID})},
+		},
+	}
+	dns := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "d2k-workloads",
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": "svc",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 80, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+	lb := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: publishedServiceName("svc"), Namespace: "d2k-workloads"},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer,
+			Selector: map[string]string{"app": "svc"},
+			Ports: []corev1.ServicePort{{Name: "port-0", Port: 8080, TargetPort: intstr.FromInt(80)}},
+		},
+	}
+
+	a := newIsolationTestAdapter(existing, pod, dns, lb)
+	for _, network := range []*NetworkSummary{front, back} {
+		a.networks[network.Name] = network
+		if err := a.persistNetwork(ctx, network); err != nil {
+			t.Fatalf("persistNetwork(%s): %v", network.Name, err)
+		}
+	}
+	tcp := corev1.ProtocolTCP
+	oldPort := intstr.FromInt(80)
+	if err := a.ensurePublishedIngressPolicy(ctx, "svc", []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &oldPort}}); err != nil {
+		t.Fatalf("old published policy: %v", err)
+	}
+
+	body := strings.NewReader(`{
+		"Name":"svc",
+		"TaskTemplate":{"ContainerSpec":{"Image":"image:new"},"Networks":[{"Target":"` + back.ID + `"}]},
+		"Mode":{"Replicated":{"Replicas":1}},
+		"EndpointSpec":{"Mode":"vip","Ports":[{"Protocol":"tcp","TargetPort":8443,"PublishedPort":9443,"PublishMode":"ingress"}]}
+	}`)
+	result, err := a.SwarmCreateService(ctx, body)
+	if err != nil {
+		t.Fatalf("SwarmCreateService existing path: %v", err)
+	}
+	if result["ID"] != "stable-service-id" {
+		t.Fatalf("stable service ID not preserved: %#v", result)
+	}
+
+	got, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated deployment: %v", err)
+	}
+	if got.Annotations[types.AnnotationNetworkIDs] != encodeNetworkIDs([]string{back.ID}) {
+		t.Fatalf("deployment network membership was not replaced: %q", got.Annotations[types.AnnotationNetworkIDs])
+	}
+	livePod, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get live pod: %v", err)
+	}
+	if livePod.Labels[networkLabelKey(front.ID)] != "" || livePod.Labels[networkLabelKey(back.ID)] != "true" {
+		t.Fatalf("live pod membership was not reconciled: %#v", livePod.Labels)
+	}
+
+	gotDNS, err := a.client.CoreV1().Services(a.namespace).Get(ctx, "svc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DNS service: %v", err)
+	}
+	if len(gotDNS.Spec.Ports) != 1 || gotDNS.Spec.Ports[0].Port != 8443 ||
+		gotDNS.Spec.Selector[types.LabelManagedBy] != types.LabelManagedByValue {
+		t.Fatalf("DNS service was not fully reconciled: %#v", gotDNS.Spec)
+	}
+
+	gotLB, err := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName("svc"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get published service: %v", err)
+	}
+	if len(gotLB.Spec.Ports) != 1 || gotLB.Spec.Ports[0].Port != 9443 ||
+		gotLB.Spec.Ports[0].TargetPort.IntVal != 8443 ||
+		gotLB.Spec.Selector[types.LabelManagedBy] != types.LabelManagedByValue {
+		t.Fatalf("published service was not fully reconciled: %#v", gotLB.Spec)
+	}
+
+	policy, err := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, publishedPolicyName("svc"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get published policy: %v", err)
+	}
+	if len(policy.Spec.Ingress) != 1 || len(policy.Spec.Ingress[0].Ports) != 1 ||
+		policy.Spec.Ingress[0].Ports[0].Port.IntVal != 8443 {
+		t.Fatalf("published policy was not reconciled: %#v", policy.Spec.Ingress)
+	}
+}
