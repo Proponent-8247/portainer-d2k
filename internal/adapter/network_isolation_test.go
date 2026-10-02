@@ -1255,7 +1255,6 @@ func TestSwarmCreateExistingReconcilesNetworksServicesAndPolicy(t *testing.T) {
 	}
 }
 
-
 func TestSwarmCreateFailsClosedOnBareDNSCollision(t *testing.T) {
 	ctx := context.Background()
 	network := testNetwork("stack-b-default", false, false)
