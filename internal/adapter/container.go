@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
@@ -14,6 +14,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,6 +36,7 @@ type RunOptions struct {
 	ExposedPorts map[string]struct{}
 	Volumes      []string
 	GPUCount     int
+	Networks     []string
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -81,6 +83,14 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
+	if a.networkIsolation {
+		if err := a.validateManualNetworkRefs(ctx, opts.Networks, "bridge"); err != nil {
+			return "", warnings, err
+		}
+		if err := a.applyDeploymentNetworks(ctx, deployment, opts.Networks, "bridge"); err != nil {
+			return "", warnings, err
+		}
+	}
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
@@ -110,7 +120,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	// ClusterIP Services with an empty ports list but headless Services are allowed
 	// without ports and still register the DNS name for short-name resolution.
 	clusterSpec := corev1.ServiceSpec{
-		Selector: map[string]string{"app": opts.Name},
+		Selector: a.workloadSelector(opts.Name),
 		Ports:    clusterPorts,
 	}
 	if len(clusterPorts) == 0 {
@@ -130,10 +140,14 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		Spec: clusterSpec,
 	}
 	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
-		if !errors.IsAlreadyExists(svcErr) {
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+		if errors.IsAlreadyExists(svcErr) {
+			return "", warnings, fmt.Errorf(
+				"DNS service name %q already exists; refusing to attach container %q to an ambiguous Kubernetes DNS identity",
+				clusterSvc.Name, opts.Name,
+			)
 		}
+		return "", warnings, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
 	}
 
 	// Create a LoadBalancer or NodePort Service for externally published ports.
@@ -147,6 +161,15 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
+		}
+	}
+
+	if a.networkIsolation {
+		if err := a.ensurePublishedIngressPolicy(ctx, opts.Name, mappingsToNetworkPolicyPorts(mappings)); err != nil {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(opts.Name), metav1.DeleteOptions{})
+			return "", warnings, fmt.Errorf("unable to create published-port isolation policy for %q: %w", opts.Name, err)
 		}
 	}
 
@@ -170,7 +193,7 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 
 		// Look up the Service to get the LoadBalancer IP.
 		// Service name may have a "svc-" prefix if the deployment name started with a digit.
-		svcName := serviceName(d.Name)
+		svcName := publishedServiceName(d.Name)
 		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, svcName, metav1GetOptions())
 		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 			summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
@@ -193,15 +216,30 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 		return err
 	}
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+	if getErr != nil {
+		return fmt.Errorf("unable to verify ownership of deployment %q before stop: %w", resolved, getErr)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead")
 	}
-	return a.scaleDeployment(ctx, name, 0)
+	return a.scaleDeployment(ctx, resolved, 0)
 }
 
 // StartContainer implements docker start: scales the Deployment back to 1 replica.
+// Swarm-managed workloads must be changed through the Swarm service API.
 func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name string) error {
-	return a.scaleDeployment(ctx, name, 1)
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if err != nil {
+		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot start a container that is managed by swarm: use docker service scale instead")
+	}
+	return a.scaleDeployment(ctx, resolved, 1)
 }
 
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
@@ -215,55 +253,237 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	// Refuse to remove containers that back a swarm service — the same guard
 	// Docker Swarm applies: "cannot remove a running container that is managed by swarm".
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+	if getErr != nil {
+		return fmt.Errorf("unable to verify ownership of deployment %q before remove: %w", resolved, getErr)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
 	}
 
+	if a.networkIsolation {
+		if err := a.deletePublishedIngressPolicy(ctx, resolved); err != nil {
+			return fmt.Errorf("unable to delete published-port isolation policy for %q: %w", resolved, err)
+		}
+	}
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
-	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
+	if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to delete DNS service %q: %w", resolved, err)
+	}
+	published := publishedServiceName(resolved)
+	if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, published, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to delete published service %q: %w", published, err)
+	}
 
 	return nil
 }
-// Rename Container
+
+// RenameContainer recreates the standalone workload under a new Kubernetes
+// identity while preserving Docker-network membership and publication intent.
+// Swarm-owned workloads are deliberately excluded: their identity belongs to
+// the Swarm service API.
 func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID, newName string) error {
-    resolved, err := a.resolveDeploymentName(ctx, nameOrID)
-    if err != nil {
-        return err
-    }
+	resolved, err := a.resolveDeploymentName(ctx, nameOrID)
+	if err != nil {
+		return err
+	}
 
-    d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-    if err != nil {
-        return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
-    }
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if err != nil {
+		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot rename a container that is managed by swarm: update the service instead")
+	}
 
-    // Sanitise the new name.
-    newName = strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(newName, "/"), "_", "-"))
-    if len(newName) > 63 {
-        newName = newName[:63]
-    }
-    newName = strings.TrimRight(newName, "-")
+	newName = strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(newName, "/"), "_", "-"))
+	if len(newName) > 63 {
+		newName = newName[:63]
+	}
+	newName = strings.TrimRight(newName, "-")
+	if newName == "" {
+		return fmt.Errorf("new container name is empty after Kubernetes name sanitisation")
+	}
+	if newName == resolved {
+		return nil
+	}
 
-    // Create a new Deployment with the new name, copying the spec.
-    newDeployment := d.DeepCopy()
-    newDeployment.Name = newName
-    newDeployment.ResourceVersion = ""
-    newDeployment.UID = ""
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, newName, metav1.GetOptions{}); err == nil {
+		return fmt.Errorf("container name %q is already in use", newName)
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to check target container name %q: %w", newName, err)
+	}
 
-    if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, newDeployment, metav1.CreateOptions{}); err != nil {
-        return fmt.Errorf("unable to create renamed deployment %q: %w", newName, err)
-    }
+	// Snapshot owned Services and the published ingress policy before creating
+	// anything. Unexpected read failures abort without changing the old
+	// container.
+	var dnsService *corev1.Service
+	if svc, getErr := a.client.CoreV1().Services(a.namespace).Get(ctx, resolved, metav1.GetOptions{}); getErr == nil {
+		dnsService = svc
+	} else if !errors.IsNotFound(getErr) {
+		return fmt.Errorf("unable to inspect DNS service for %q: %w", resolved, getErr)
+	}
 
-    // Delete the old Deployment.
-    if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
-        return fmt.Errorf("unable to delete old deployment %q: %w", resolved, err)
-    }
+	oldPublishedName := publishedServiceName(resolved)
+	var publishedService *corev1.Service
+	if svc, getErr := a.client.CoreV1().Services(a.namespace).Get(ctx, oldPublishedName, metav1.GetOptions{}); getErr == nil {
+		publishedService = svc
+	} else if !errors.IsNotFound(getErr) {
+		return fmt.Errorf("unable to inspect published service for %q: %w", resolved, getErr)
+	}
 
-    return nil
+	var publishedPolicyPorts []networkingv1.NetworkPolicyPort
+	oldPolicyName := publishedPolicyName(resolved)
+	oldPolicyExists := false
+	if a.networkIsolation {
+		policy, getErr := a.client.NetworkingV1().NetworkPolicies(a.namespace).Get(ctx, oldPolicyName, metav1.GetOptions{})
+		if getErr == nil {
+			oldPolicyExists = true
+			for _, ingress := range policy.Spec.Ingress {
+				publishedPolicyPorts = append(publishedPolicyPorts, ingress.Ports...)
+			}
+		} else if !errors.IsNotFound(getErr) {
+			return fmt.Errorf("unable to inspect published-port isolation policy for %q: %w", resolved, getErr)
+		}
+		if publishedService != nil && !oldPolicyExists {
+			return fmt.Errorf("published service %q exists without its isolation policy; refusing rename until policy state is reconciled", oldPublishedName)
+		}
+	}
+
+	newDeployment := d.DeepCopy()
+	newDeployment.Name = newName
+	newDeployment.ResourceVersion = ""
+	newDeployment.UID = ""
+	newDeployment.Generation = 0
+	newDeployment.CreationTimestamp = metav1.Time{}
+	newDeployment.ManagedFields = nil
+	newDeployment.Status = appsv1.DeploymentStatus{}
+	if newDeployment.Labels == nil {
+		newDeployment.Labels = map[string]string{}
+	}
+	newDeployment.Labels["app"] = newName
+	newDeployment.Labels[types.LabelWorkloadName] = newName
+	if newDeployment.Spec.Selector == nil {
+		newDeployment.Spec.Selector = &metav1.LabelSelector{}
+	}
+	if newDeployment.Spec.Selector.MatchLabels == nil {
+		newDeployment.Spec.Selector.MatchLabels = map[string]string{}
+	}
+	newDeployment.Spec.Selector.MatchLabels["app"] = newName
+	if newDeployment.Spec.Template.Labels == nil {
+		newDeployment.Spec.Template.Labels = map[string]string{}
+	}
+	newDeployment.Spec.Template.Labels["app"] = newName
+	newDeployment.Spec.Template.Labels[types.LabelWorkloadName] = newName
+	if len(newDeployment.Spec.Template.Spec.Containers) > 0 {
+		newDeployment.Spec.Template.Spec.Containers[0].Name = newName
+	}
+
+	resetService := func(old *corev1.Service, name string) *corev1.Service {
+		if old == nil {
+			return nil
+		}
+		svc := old.DeepCopy()
+		svc.Name = name
+		svc.ResourceVersion = ""
+		svc.UID = ""
+		svc.Generation = 0
+		svc.CreationTimestamp = metav1.Time{}
+		svc.ManagedFields = nil
+		svc.Finalizers = nil
+		svc.OwnerReferences = nil
+		svc.Status = corev1.ServiceStatus{}
+		if svc.Labels == nil {
+			svc.Labels = map[string]string{}
+		}
+		svc.Labels["app"] = newName
+		svc.Labels[types.LabelWorkloadName] = newName
+		if svc.Spec.Selector == nil {
+			svc.Spec.Selector = map[string]string{}
+		}
+		svc.Spec.Selector["app"] = newName
+		if svc.Spec.ClusterIP != corev1.ClusterIPNone {
+			svc.Spec.ClusterIP = ""
+		}
+		svc.Spec.ClusterIPs = nil
+		svc.Spec.IPFamilies = nil
+		svc.Spec.IPFamilyPolicy = nil
+		svc.Spec.HealthCheckNodePort = 0
+		for i := range svc.Spec.Ports {
+			svc.Spec.Ports[i].NodePort = 0
+		}
+		return svc
+	}
+
+	newDNS := resetService(dnsService, newName)
+	newPublishedName := publishedServiceName(newName)
+	newPublished := resetService(publishedService, newPublishedName)
+
+	// Build the complete replacement first. The old workload remains untouched
+	// until all resources needed by the new identity exist.
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, newDeployment, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("unable to create renamed deployment %q: %w", newName, err)
+	}
+	rollback := func() {
+		if a.networkIsolation {
+			_ = a.deletePublishedIngressPolicy(ctx, newName)
+		}
+		if newPublished != nil {
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, newPublishedName, metav1.DeleteOptions{})
+		}
+		if newDNS != nil {
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, newName, metav1.DeleteOptions{})
+		}
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, newName, metav1.DeleteOptions{})
+	}
+
+	if newDNS != nil {
+		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, newDNS, metav1.CreateOptions{}); err != nil {
+			rollback()
+			return fmt.Errorf("unable to create renamed DNS service %q: %w", newName, err)
+		}
+	}
+	if newPublished != nil {
+		// Install the allow policy before exposing the replacement Service. This
+		// avoids even a small exposure window if the namespace baseline is
+		// temporarily missing or being reconciled.
+		if a.networkIsolation {
+			if err := a.ensurePublishedIngressPolicy(ctx, newName, publishedPolicyPorts); err != nil {
+				rollback()
+				return fmt.Errorf("unable to create renamed published-port isolation policy for %q: %w", newName, err)
+			}
+		}
+		if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, newPublished, metav1.CreateOptions{}); err != nil {
+			rollback()
+			return fmt.Errorf("unable to create renamed published service %q: %w", newPublishedName, err)
+		}
+	}
+
+	// Cut over by deleting the old Deployment first. Any later cleanup failure
+	// leaves only stale selectors/policy that match no live old workload.
+	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
+		rollback()
+		return fmt.Errorf("unable to delete old deployment %q: %w", resolved, err)
+	}
+	if a.networkIsolation && oldPolicyExists {
+		if err := a.deletePublishedIngressPolicy(ctx, resolved); err != nil {
+			return fmt.Errorf("renamed container but unable to delete old published-port isolation policy %q: %w", oldPolicyName, err)
+		}
+	}
+	if dnsService != nil {
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("renamed container but unable to delete old DNS service %q: %w", resolved, err)
+		}
+	}
+	if publishedService != nil {
+		if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, oldPublishedName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("renamed container but unable to delete old published service %q: %w", oldPublishedName, err)
+		}
+	}
+
+	return nil
 }
 
 // InspectContainer implements docker inspect for a single container.
@@ -279,7 +499,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	}
 
 	lbIP := ""
-	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(resolved), metav1GetOptions())
+	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName(resolved), metav1GetOptions())
 	if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 		lbIP = svc.Status.LoadBalancer.Ingress[0].IP
 		if lbIP == "" {
@@ -287,7 +507,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	result := deploymentToContainerJSON(*d, lbIP)
+	result := a.deploymentToContainerJSON(ctx, *d, lbIP)
 	return &result, nil
 }
 
@@ -296,9 +516,17 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
 	for k, v := range opts.Labels {
+		if a.networkIsolation && strings.HasPrefix(k, types.LabelPrefix+"/") {
+			continue
+		}
 		if clean, ok := sanitiseLabelValue(v); ok {
 			labels[k] = clean
 		}
+	}
+	if a.networkIsolation {
+		labels[types.LabelManagedBy] = types.LabelManagedByValue
+		labels[types.LabelWorkloadName] = opts.Name
+		labels["app"] = opts.Name
 	}
 
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
@@ -378,11 +606,11 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:    opts.Name,
-							Image:   opts.Image,
-							Command: opts.Cmd,
-							Env:     envVars,
-							Ports:   containerPorts,
+							Name:      opts.Name,
+							Image:     opts.Image,
+							Command:   opts.Cmd,
+							Env:       envVars,
+							Ports:     containerPorts,
 							Resources: resourceReqs,
 						},
 					},
@@ -417,7 +645,7 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 		ports = append(ports, sp)
 	}
 
-	svcName := serviceName(name)
+	svcName := publishedServiceName(name)
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -427,10 +655,26 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
-			Selector: map[string]string{"app": name},
+			Selector: a.workloadSelector(name),
 			Ports:    ports,
 		},
 	}, nil
+}
+
+// publishedServiceName returns a DNS-safe name for the externally published
+// Service. It is intentionally distinct from the internal DNS Service, which
+// uses the container name directly.
+func publishedServiceName(name string) string {
+	base := serviceName(name)
+	const suffix = "-lb"
+	maxBase := 63 - len(suffix)
+	if len(base) > maxBase {
+		base = strings.TrimRight(base[:maxBase], "-")
+	}
+	if base == "" {
+		base = "d2k"
+	}
+	return base + suffix
 }
 
 // serviceName returns the Kubernetes Service name for a given deployment name.
@@ -557,7 +801,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 	}
 }
 
-func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
+func (a *KubernetesDockerAdapter) deploymentToContainerJSON(ctx context.Context, d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
 	running := d.Status.ReadyReplicas > 0
 
 	state := &dockertypes.ContainerState{
@@ -592,6 +836,16 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 		hostConfig.PortBindings = portMap
 	}
 
+	networks := map[string]*network.EndpointSettings{
+		"bridge": {
+			IPAddress: lbIP,
+			NetworkID: "bridge",
+		},
+	}
+	if a.networkIsolation {
+		networks = a.containerNetworkSettings(ctx, d, lbIP)
+	}
+
 	return dockertypes.ContainerJSON{
 		ContainerJSONBase: &dockertypes.ContainerJSONBase{
 			ID:         string(d.UID),
@@ -620,14 +874,50 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
 				IPAddress: lbIP,
 			},
-			Networks: map[string]*network.EndpointSettings{
-				"bridge": {
-					IPAddress: lbIP,
-					NetworkID: "bridge",
-				},
-			},
+			Networks: networks,
 		},
 	}
+}
+
+func (a *KubernetesDockerAdapter) containerNetworkSettings(ctx context.Context, d appsv1.Deployment, fallbackIP string) map[string]*network.EndpointSettings {
+	if !a.networkIsolation {
+		return map[string]*network.EndpointSettings{
+			"bridge": {
+				IPAddress: fallbackIP,
+				NetworkID: "bridge",
+			},
+		}
+	}
+
+	if err := a.restorePersistedNetworks(ctx); err != nil {
+		a.logger.Warnw("unable to restore network state for container inspect", "container", d.Name, "error", err)
+	}
+
+	ipAddress := fallbackIP
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=" + d.Name,
+	})
+	if err == nil {
+		for _, pod := range pods.Items {
+			if pod.Status.PodIP != "" {
+				ipAddress = pod.Status.PodIP
+				break
+			}
+		}
+	}
+
+	result := map[string]*network.EndpointSettings{}
+	for _, id := range decodeNetworkIDs(d.Annotations[types.AnnotationNetworkIDs]) {
+		name := id
+		if summary, ok := a.lookupNetwork(id); ok {
+			name = summary.Name
+		}
+		result[name] = &network.EndpointSettings{
+			IPAddress: ipAddress,
+			NetworkID: id,
+		}
+	}
+	return result
 }
 
 // humanizeDuration formats a duration the way Docker does in docker ps STATUS:

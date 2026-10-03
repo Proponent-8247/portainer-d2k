@@ -24,8 +24,8 @@ import (
 // KubernetesDockerAdapter bridges Docker API calls to a single Kubernetes namespace.
 type KubernetesDockerAdapter struct {
 	// client is the Kubernetes API client.
-	client kubernetes.Interface
-	metricsClient    *metricsclient.Clientset
+	client        kubernetes.Interface
+	metricsClient *metricsclient.Clientset
 
 	// namespace is the target Kubernetes namespace for all operations.
 	namespace string
@@ -48,9 +48,14 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	logger *zap.SugaredLogger
-	prevCPU   map[string]int64
-	prevCPUMu sync.RWMutex
+	networkIsolation bool
+	podCIDRs         []string
+	serviceCIDRs      []string
+	isolationReady    bool
+
+	logger     *zap.SugaredLogger
+	prevCPU    map[string]int64
+	prevCPUMu  sync.RWMutex
 	networks   map[string]*NetworkSummary
 	networksMu sync.RWMutex
 	// nfsStorageClasses caches nfs.csi.k8s.io StorageClass names discovered at
@@ -84,7 +89,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to reach namespace %q in cluster: %w", opts.Config.Namespace, err)
 	}
 
-// Probe metrics API — optional, failures are non-fatal.
+	// Probe metrics API — optional, failures are non-fatal.
 	mc := initMetricsClient(restCfg)
 	if mc != nil {
 		if probeMetricsAPI(context.Background(), mc, opts.Config.Namespace) {
@@ -95,19 +100,50 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		}
 	}
 
-	return &KubernetesDockerAdapter{
-		client:           client,
-		metricsClient:    mc,
-		restConfig:       restCfg,
-		namespace:        opts.Config.Namespace,
-		apiServerHost:    apiServerHost(restCfg.Host),
-		lowPortThreshold: opts.Config.LowPortThreshold,
-		gpuResourceName:  opts.Config.GPUResourceName,
-		logger:           opts.Logger,
+	var podCIDRs, serviceCIDRs []string
+	if opts.Config.NetworkIsolation {
+		podCIDRs, err = parseCIDRList(opts.Config.PodCIDRs, "D2K_POD_CIDRS")
+		if err != nil {
+			return nil, err
+		}
+		serviceCIDRs, err = parseCIDRList(opts.Config.ServiceCIDRs, "D2K_SERVICE_CIDRS")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	a := &KubernetesDockerAdapter{
+		client:            client,
+		metricsClient:     mc,
+		restConfig:        restCfg,
+		namespace:         opts.Config.Namespace,
+		apiServerHost:     apiServerHost(restCfg.Host),
+		lowPortThreshold:  opts.Config.LowPortThreshold,
+		gpuResourceName:   opts.Config.GPUResourceName,
+		networkIsolation:  opts.Config.NetworkIsolation,
+		podCIDRs:          podCIDRs,
+		serviceCIDRs:      serviceCIDRs,
+		logger:            opts.Logger,
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
-	}, nil
+	}
+	if a.networkIsolation {
+		if len(a.podCIDRs) == 0 || len(a.serviceCIDRs) == 0 {
+			return nil, fmt.Errorf("network isolation requires D2K_POD_CIDRS and D2K_SERVICE_CIDRS")
+		}
+		if err := a.reconcileIsolationState(context.Background()); err != nil {
+			return nil, fmt.Errorf("unable to initialize Docker-network isolation safely: %w", err)
+		}
+		opts.Logger.Infow("Docker-network-equivalent isolation enabled", "podCIDRs", a.podCIDRs, "serviceCIDRs", a.serviceCIDRs)
+	}
+	return a, nil
+}
+
+// NetworkIsolationEnabled reports whether persisted/enforced Docker network
+// semantics are active for this adapter.
+func (a *KubernetesDockerAdapter) NetworkIsolationEnabled() bool {
+	return a.networkIsolation
 }
 
 // apiServerHost extracts the bare hostname or IP from a Kubernetes API server

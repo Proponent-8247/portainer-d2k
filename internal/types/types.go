@@ -71,4 +71,13 @@ const (
 	// AnnotationEndpointMode stores the Swarm endpoint mode for a service.
 	// Values: "vip" (default) or "dnsrr" (host-port / direct node IP mode).
 	AnnotationEndpointMode = LabelPrefix + "/endpoint-mode"
+
+	// LabelNetworkPrefix prefixes deterministic logical-network membership labels.
+	LabelNetworkPrefix = LabelPrefix + "/net-"
+
+	// AnnotationNetworkIDs stores the authoritative Docker network membership list.
+	AnnotationNetworkIDs = LabelPrefix + "/network-ids"
+
+	// LabelNetworkState marks ConfigMaps that persist Docker network definitions.
+	LabelNetworkState = LabelPrefix + "/network-state"
 )
