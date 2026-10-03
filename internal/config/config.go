@@ -66,7 +66,4 @@ type Config struct {
 	// world egress so unrelated Docker networks cannot bypass isolation.
 	PodCIDRs     string `env:"D2K_POD_CIDRS"`
 	ServiceCIDRs string `env:"D2K_SERVICE_CIDRS"`
-
-	// RejectHostNetwork rejects Docker host-network requests while isolation is active.
-	RejectHostNetwork bool `env:"D2K_REJECT_HOST_NETWORK,default=true"`
 }
