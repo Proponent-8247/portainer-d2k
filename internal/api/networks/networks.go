@@ -1,7 +1,7 @@
 // Package networks implements the Docker Engine API surface for network management.
-// Kubernetes namespace networking is flat - all Pods share the same network.
-// d2k accepts network calls and returns synthetic responses rather than
-// attempting to map Docker network isolation to Kubernetes constructs.
+// By default d2k preserves its compatibility-only synthetic network behavior.
+// When network isolation is enabled, Docker network definitions and membership
+// are persisted and enforced through Kubernetes NetworkPolicy.
 //
 // Implemented endpoints:
 //
@@ -13,6 +13,7 @@ package networks
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -189,12 +190,20 @@ func (h *Handler) DispatchPost(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/connect"):
 		if err := h.adapter.ConnectNetwork(r.Context(), nameOrID, body.Container); err != nil {
-			httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, adapter.ErrNetworkIsolationDisabled) {
+				status = http.StatusNotImplemented
+			}
+			httputils.WriteError(w, status, err.Error())
 			return
 		}
 	case strings.HasSuffix(r.URL.Path, "/disconnect"):
 		if err := h.adapter.DisconnectNetwork(r.Context(), nameOrID, body.Container); err != nil {
-			httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, adapter.ErrNetworkIsolationDisabled) {
+				status = http.StatusNotImplemented
+			}
+			httputils.WriteError(w, status, err.Error())
 			return
 		}
 	default:
