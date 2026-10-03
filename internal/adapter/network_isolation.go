@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,10 @@ import (
 	"github.com/portainer/d2k/internal/types"
 	"github.com/portainer/d2k/pkg/portmapper"
 )
+
+// ErrNetworkIsolationDisabled is returned when a Docker network mutation
+// requires persistent/enforced network state but isolation is disabled.
+var ErrNetworkIsolationDisabled = errors.New("docker network connect/disconnect requires D2K_NETWORK_ISOLATION=true")
 
 func parseCIDRList(raw, field string) ([]string, error) {
 	if strings.TrimSpace(raw) == "" {
@@ -271,6 +276,10 @@ func (a *KubernetesDockerAdapter) persistNetwork(ctx context.Context, n *Network
 	if err != nil {
 		return err
 	}
+	if current.Labels[types.LabelManagedBy] != types.LabelManagedByValue ||
+		current.Labels[types.LabelNetworkState] != "true" {
+		return fmt.Errorf("refusing to overwrite ConfigMap %q because it is not owned by d2k network state", cm.Name)
+	}
 	cm.ResourceVersion = current.ResourceVersion
 	_, err = api.Update(ctx, cm, metav1.UpdateOptions{})
 	return err
@@ -292,7 +301,7 @@ func (a *KubernetesDockerAdapter) restorePersistedNetworks(ctx context.Context) 
 		return nil
 	}
 	cms, err := a.client.CoreV1().ConfigMaps(a.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: types.LabelNetworkState + "=true",
+		LabelSelector: types.LabelNetworkState + "=true," + types.LabelManagedBy + "=" + types.LabelManagedByValue,
 	})
 	if err != nil {
 		return err
@@ -403,7 +412,7 @@ func (a *KubernetesDockerAdapter) networkMembership(ctx context.Context, refs []
 		if err != nil {
 			return nil, nil, err
 		}
-		if a.rejectHostNetwork && network.Name == "host" {
+		if network.Name == "host" {
 			return nil, nil, fmt.Errorf("host network mode is rejected while Docker-network isolation is enabled")
 		}
 		if network.Name == "none" {
@@ -664,6 +673,9 @@ func (a *KubernetesDockerAdapter) applyNetworkPolicy(ctx context.Context, desire
 	if err != nil {
 		return err
 	}
+	if current.Labels[types.LabelManagedBy] != types.LabelManagedByValue {
+		return fmt.Errorf("refusing to overwrite NetworkPolicy %q because it is not owned by d2k", desired.Name)
+	}
 	desired.ResourceVersion = current.ResourceVersion
 	_, err = api.Update(ctx, desired, metav1.UpdateOptions{})
 	return err
@@ -795,7 +807,7 @@ func (a *KubernetesDockerAdapter) patchExistingPodNetworks(ctx context.Context, 
 
 func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef, containerName string) error {
 	if !a.networkIsolation {
-		return nil
+		return ErrNetworkIsolationDisabled
 	}
 
 	if err := a.validateManualNetworkRefs(ctx, []string{networkRef}, ""); err != nil {
@@ -837,7 +849,7 @@ func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkRef
 
 func (a *KubernetesDockerAdapter) DisconnectNetwork(ctx context.Context, networkRef, containerName string) error {
 	if !a.networkIsolation {
-		return nil
+		return ErrNetworkIsolationDisabled
 	}
 
 	resolved, err := a.resolveDeploymentName(ctx, containerName)
