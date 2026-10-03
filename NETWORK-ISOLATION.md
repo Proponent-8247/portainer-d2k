@@ -10,7 +10,6 @@ Set all of the following on the d2k server:
 D2K_NETWORK_ISOLATION=true
 D2K_POD_CIDRS=<comma-separated Kubernetes Pod CIDRs>
 D2K_SERVICE_CIDRS=<comma-separated Kubernetes Service CIDRs>
-D2K_REJECT_HOST_NETWORK=true
 ```
 
 CIDRs are parsed and validated at startup. Invalid or missing CIDRs make d2k fail closed instead of creating an unsafe world-egress policy.
@@ -25,7 +24,7 @@ For each logical Docker network, d2k reconciles a Kubernetes NetworkPolicy:
 
 - same-network ingress is allowed;
 - same-network egress is allowed;
-- DNS to CoreDNS is allowed;
+- DNS to the conventional `kube-system` / `k8s-app=kube-dns` resolver Pods is allowed; clusters using a different DNS deployment or node-local DNS path must adapt the policy implementation before enabling isolation;
 - ordinary networks receive world egress, excluding configured Pod and Service CIDRs;
 - `internal: true` networks do not receive world egress;
 - `none` receives no connectivity;
@@ -34,7 +33,7 @@ For each logical Docker network, d2k reconciles a Kubernetes NetworkPolicy:
 
 Multiple Docker networks are additive: a workload attached to `frontend` and `backend` receives both membership labels and can communicate with peers on either network. Peers that share no logical network remain isolated even though all Pods are in the same Kubernetes namespace.
 
-Standard Kubernetes NetworkPolicy is used intentionally. The feature uses standard Kubernetes NetworkPolicy and therefore works with any CNI that correctly enforces NetworkPolicy.
+Standard Kubernetes NetworkPolicy is used intentionally. The feature uses standard Kubernetes NetworkPolicy and requires a CNI that enforces it. NetworkPolicy details such as `ipBlock` handling relative to Service/NAT translation vary across implementations, so validate the behavior on the target CNI with the live harness before relying on isolation.
 
 ## Migration safety
 
@@ -80,7 +79,7 @@ Published-port policies are installed only after the workload and Services have 
 
 ## Explicit exceptions
 
-Host networking bypasses Pod-level NetworkPolicy and is rejected by default while isolation is enabled. Set `D2K_REJECT_HOST_NETWORK=false` only if that escape hatch is explicitly desired.
+Host networking bypasses Pod-level NetworkPolicy and is rejected while isolation is enabled. d2k does not currently translate Docker host networking into Kubernetes `hostNetwork` semantics.
 
 `macvlan` and `ipvlan` remain unsupported because d2k does not create secondary CNI interfaces.
 
