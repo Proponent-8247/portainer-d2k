@@ -27,7 +27,6 @@ func newIsolationTestAdapter(objects ...runtime.Object) *KubernetesDockerAdapter
 		client:            fake.NewSimpleClientset(objects...),
 		namespace:         "d2k-workloads",
 		networkIsolation:  true,
-		rejectHostNetwork: true,
 		podCIDRs:          []string{"10.240.0.0/16"},
 		serviceCIDRs:      []string{"10.241.0.0/16"},
 		logger:            zap.NewNop().Sugar(),
@@ -79,6 +78,57 @@ func managedDeployment(name string, networkIDs ...string) *appsv1.Deployment {
 				},
 			},
 		},
+	}
+}
+
+func TestNetworkMutationRequiresIsolation(t *testing.T) {
+	a := &KubernetesDockerAdapter{}
+
+	if err := a.ConnectNetwork(context.Background(), "frontend", "web"); err != ErrNetworkIsolationDisabled {
+		t.Fatalf("ConnectNetwork error = %v, want %v", err, ErrNetworkIsolationDisabled)
+	}
+	if err := a.DisconnectNetwork(context.Background(), "frontend", "web"); err != ErrNetworkIsolationDisabled {
+		t.Fatalf("DisconnectNetwork error = %v, want %v", err, ErrNetworkIsolationDisabled)
+	}
+}
+
+func TestHostNetworkIsRejectedWhenIsolationIsEnabled(t *testing.T) {
+	a := newIsolationTestAdapter()
+	if _, _, err := a.networkMembership(context.Background(), []string{"host"}, ""); err == nil ||
+		!strings.Contains(err.Error(), "host network mode is rejected") {
+		t.Fatalf("expected host network rejection, got %v", err)
+	}
+}
+
+func TestPersistNetworkRefusesForeignConfigMapCollision(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("frontend", false, true)
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      networkStateName(network.ID),
+			Namespace: "d2k-workloads",
+		},
+	}
+	a := newIsolationTestAdapter(foreign)
+
+	if err := a.persistNetwork(ctx, network); err == nil || !strings.Contains(err.Error(), "not owned by d2k") {
+		t.Fatalf("expected foreign ConfigMap ownership error, got %v", err)
+	}
+}
+
+func TestNetworkPolicyRefusesForeignObjectCollision(t *testing.T) {
+	ctx := context.Background()
+	network := testNetwork("frontend", false, true)
+	foreign := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      networkPolicyName(network.ID),
+			Namespace: "d2k-workloads",
+		},
+	}
+	a := newIsolationTestAdapter(foreign)
+
+	if err := a.ensureNetworkIsolationPolicy(ctx, network); err == nil || !strings.Contains(err.Error(), "not owned by d2k") {
+		t.Fatalf("expected foreign NetworkPolicy ownership error, got %v", err)
 	}
 }
 
