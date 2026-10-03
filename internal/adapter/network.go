@@ -100,6 +100,9 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		types.LabelWorkloadName: opts.Name,
 	}
 	for k, v := range opts.Labels {
+		if strings.HasPrefix(k, types.LabelPrefix+"/") {
+			continue
+		}
 		labels[k] = v
 	}
 
