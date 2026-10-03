@@ -48,9 +48,8 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	networkIsolation  bool
-	rejectHostNetwork bool
-	podCIDRs          []string
+	networkIsolation bool
+	podCIDRs         []string
 	serviceCIDRs      []string
 	isolationReady    bool
 
@@ -122,7 +121,6 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		lowPortThreshold:  opts.Config.LowPortThreshold,
 		gpuResourceName:   opts.Config.GPUResourceName,
 		networkIsolation:  opts.Config.NetworkIsolation,
-		rejectHostNetwork: opts.Config.RejectHostNetwork,
 		podCIDRs:          podCIDRs,
 		serviceCIDRs:      serviceCIDRs,
 		logger:            opts.Logger,
