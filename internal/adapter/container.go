@@ -78,14 +78,6 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to resolve port mappings: %w", err)
 	}
 
-	if a.networkIsolation && a.rejectHostNetwork {
-		for _, ref := range opts.Networks {
-			if ref == "host" {
-				return "", warnings, fmt.Errorf("host network mode is rejected while Docker-network isolation is enabled")
-			}
-		}
-	}
-
 	// Build and create the Deployment.
 	deployment, err := a.buildDeployment(ctx, opts, kind, mappings)
 	if err != nil {
