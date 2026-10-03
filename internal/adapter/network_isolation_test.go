@@ -162,6 +162,70 @@ func TestNetworkPolicyRefusesForeignObjectCollision(t *testing.T) {
 	}
 }
 
+func TestIsolationProtectsReservedOwnershipLabels(t *testing.T) {
+	ctx := context.Background()
+	a := newIsolationTestAdapter()
+
+	if _, _, err := a.CreateContainer(ctx, RunOptions{
+		Name:  "standalone",
+		Image: "busybox:latest",
+		Labels: map[string]string{
+			types.LabelManagedBy: "user-controlled",
+			"app":                "user-controlled",
+		},
+	}); err != nil {
+		t.Fatalf("CreateContainer: %v", err)
+	}
+	standalone, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "standalone", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get standalone deployment: %v", err)
+	}
+	if standalone.Labels[types.LabelManagedBy] != types.LabelManagedByValue ||
+		standalone.Spec.Template.Labels[types.LabelManagedBy] != types.LabelManagedByValue ||
+		standalone.Labels["app"] != "standalone" ||
+		standalone.Spec.Template.Labels["app"] != "standalone" {
+		t.Fatalf("reserved standalone labels were overridden: %#v / %#v", standalone.Labels, standalone.Spec.Template.Labels)
+	}
+
+	network, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{
+		Name:       "frontend",
+		Driver:     "overlay",
+		Attachable: true,
+		Labels: map[string]string{
+			types.LabelManagedBy: "user-controlled",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateNetwork: %v", err)
+	}
+	if network.Labels[types.LabelManagedBy] != types.LabelManagedByValue {
+		t.Fatalf("reserved network ownership label was overridden: %#v", network.Labels)
+	}
+
+	body := strings.NewReader(`{
+		"Name":"swarm-service",
+		"Labels":{
+			"d2k.portainer.io/managed-by":"user-controlled",
+			"d2k.portainer.io/swarm-managed-by":"user-controlled",
+			"app":"user-controlled"
+		},
+		"TaskTemplate":{"ContainerSpec":{"Image":"busybox:latest"}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	if _, err := a.SwarmCreateService(ctx, body); err != nil {
+		t.Fatalf("SwarmCreateService: %v", err)
+	}
+	swarmDep, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "swarm-service", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get swarm deployment: %v", err)
+	}
+	if swarmDep.Labels[types.LabelManagedBy] != types.LabelManagedByValue ||
+		swarmDep.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue ||
+		swarmDep.Labels["app"] != "swarm-service" {
+		t.Fatalf("reserved Swarm labels were overridden: %#v", swarmDep.Labels)
+	}
+}
+
 func TestParseCIDRListRejectsInvalidValues(t *testing.T) {
 	got, err := parseCIDRList("10.240.0.1/16, 10.241.0.0/16,10.241.0.0/16", "TEST")
 	if err != nil {
