@@ -266,7 +266,6 @@ docker --context d2k service ls
 | `D2K_NETWORK_ISOLATION` | `false` | Enforce Docker logical-network isolation using Kubernetes NetworkPolicy |
 | `D2K_POD_CIDRS` | _(empty)_ | Comma-separated Pod CIDRs; required when isolation is enabled |
 | `D2K_SERVICE_CIDRS` | _(empty)_ | Comma-separated Service CIDRs; required when isolation is enabled |
-| `D2K_REJECT_HOST_NETWORK` | `true` | Reject host-network requests while isolation is enabled |
 | `D2K_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `D2K_LOG_FORMAT` | `text` | Log format: text, json |
 | `D2K_KUBECONFIG` | _(empty)_ | Path to kubeconfig. Empty = in-cluster auth |
@@ -356,7 +355,7 @@ These features are absent by design. They reflect fundamental differences betwee
 
 Additional networking features with no Kubernetes equivalent:
 
-- `--network host` — rejected by default while network isolation is enabled because host networking bypasses pod-level NetworkPolicy. Set `D2K_REJECT_HOST_NETWORK=false` only when intentionally accepting that security model.
+- `--network host` — rejected while network isolation is enabled because d2k does not translate Docker host networking and it would bypass pod-level NetworkPolicy.
 - Per-container `--dns` and `--dns-search` overrides. DNS in Kubernetes is cluster-wide and namespace-scoped via CoreDNS.
 - `--ip` and `--mac-address` — static IP and MAC assignment. Not applicable in CNI-managed networking.
 - `--link` — legacy Docker container linking. Has no Kubernetes equivalent.
