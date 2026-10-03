@@ -56,27 +56,48 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 
 	var warnings []string
 
-	if !a.networkIsolation && opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
-		warnings = append(warnings, fmt.Sprintf(
-			"network %q created but Kubernetes namespace networking is flat - "+
-				"all containers share the same network regardless of which network they are assigned to",
-			opts.Name,
-		))
+	// Network isolation is opt-in. Preserve the existing synthetic-network
+	// behavior exactly when it is disabled so enabling this feature does not
+	// change the default Docker API contract.
+	if !a.networkIsolation {
+		if opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
+			warnings = append(warnings, fmt.Sprintf(
+				"network %q created but Kubernetes namespace networking is flat - "+
+					"all containers share the same network regardless of which network they are assigned to",
+				opts.Name,
+			))
+		}
+
+		labels := map[string]string{
+			types.LabelManagedBy:    types.LabelManagedByValue,
+			types.LabelWorkloadName: opts.Name,
+		}
+		if idx := strings.LastIndex(opts.Name, "_"); idx != -1 {
+			labels["com.docker.compose.network"] = opts.Name[idx+1:]
+			labels["com.docker.compose.project"] = opts.Name[:idx]
+		}
+		for k, v := range opts.Labels {
+			labels[k] = v
+		}
+
+		summary := &NetworkSummary{
+			ID:     networkIDForName(opts.Name, a.namespace),
+			Name:   opts.Name,
+			Driver: "overlay",
+			Scope:  "swarm",
+			IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
+			Labels: labels,
+		}
+
+		a.networksMu.Lock()
+		a.networks[opts.Name] = summary
+		a.networksMu.Unlock()
+		return summary, warnings, nil
 	}
 
 	labels := map[string]string{
 		types.LabelManagedBy:    types.LabelManagedByValue,
 		types.LabelWorkloadName: opts.Name,
-	}
-	// Preserve the old synthetic Compose-label compatibility only when
-	// isolation is disabled. In isolation mode stack ownership must come from
-	// explicit Docker labels; inferring it from <project>_<network> can cause an
-	// unrelated external network to be deleted by docker stack rm.
-	if !a.networkIsolation {
-		if idx := strings.LastIndex(opts.Name, "_"); idx != -1 {
-			labels["com.docker.compose.network"] = opts.Name[idx+1:]
-			labels["com.docker.compose.project"] = opts.Name[:idx]
-		}
 	}
 	for k, v := range opts.Labels {
 		labels[k] = v
@@ -114,20 +135,18 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 	a.networks[opts.Name] = summary
 	a.networksMu.Unlock()
 
-	if a.networkIsolation {
-		if err := a.persistNetwork(ctx, summary); err != nil {
-			a.networksMu.Lock()
-			delete(a.networks, opts.Name)
-			a.networksMu.Unlock()
-			return nil, warnings, err
-		}
-		if err := a.ensureNetworkIsolationPolicy(ctx, summary); err != nil {
-			_ = a.deletePersistedNetwork(ctx, summary)
-			a.networksMu.Lock()
-			delete(a.networks, opts.Name)
-			a.networksMu.Unlock()
-			return nil, warnings, err
-		}
+	if err := a.persistNetwork(ctx, summary); err != nil {
+		a.networksMu.Lock()
+		delete(a.networks, opts.Name)
+		a.networksMu.Unlock()
+		return nil, warnings, err
+	}
+	if err := a.ensureNetworkIsolationPolicy(ctx, summary); err != nil {
+		_ = a.deletePersistedNetwork(ctx, summary)
+		a.networksMu.Lock()
+		delete(a.networks, opts.Name)
+		a.networksMu.Unlock()
+		return nil, warnings, err
 	}
 	return summary, warnings, nil
 }
