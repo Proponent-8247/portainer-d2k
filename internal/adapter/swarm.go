@@ -441,7 +441,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmServices(ctx context.Context, de
 			},
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: managedSelector(deployment.Name),
+			Selector: a.workloadSelector(deployment.Name),
 			Ports:    dnsPorts,
 		},
 	}
@@ -507,7 +507,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmServices(ctx context.Context, de
 
 	existingPublished.Labels = deployment.Labels
 	existingPublished.Spec.Type = corev1.ServiceTypeLoadBalancer
-	existingPublished.Spec.Selector = managedSelector(deployment.Name)
+	existingPublished.Spec.Selector = a.workloadSelector(deployment.Name)
 	existingPublished.Spec.Ports = publishedPorts
 	if _, err := a.client.CoreV1().Services(a.namespace).Update(ctx, existingPublished, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("unable to update published service %q: %w", publishedName, err)
@@ -832,9 +832,18 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		baseLabels[types.LabelSwarmStack] = stack
 	}
 	for k, v := range spec.Labels {
+		if a.networkIsolation && strings.HasPrefix(k, types.LabelPrefix+"/") {
+			continue
+		}
 		if clean, ok := sanitiseLabelValue(v); ok {
 			baseLabels[k] = clean
 		}
+	}
+	if a.networkIsolation {
+		baseLabels[types.LabelManagedBy] = types.LabelManagedByValue
+		baseLabels[types.LabelSwarmManagedBy] = types.LabelSwarmManagedByValue
+		baseLabels[types.LabelSwarmService] = name
+		baseLabels["app"] = name
 	}
 
 	var networkRefs []string
@@ -1046,7 +1055,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// headless Services are allowed without ports and still register the DNS
 	// name so short-name resolution (e.g. "redis") works from other pods.
 	clusterSvcSpec := corev1.ServiceSpec{
-		Selector: managedSelector(name),
+		Selector: a.workloadSelector(name),
 		Ports:    clusterIPPorts,
 	}
 	if len(clusterIPPorts) == 0 {
