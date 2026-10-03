@@ -38,7 +38,7 @@ rules:
   # Pods — for log streaming and exec
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "watch", "list"]
+    verbs: ["get", "watch", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
@@ -66,10 +66,10 @@ rules:
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "watch", "list", "create", "delete"]
 
-  # Namespaces — read-only, used for cluster UID derivation and connectivity check
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get"]
+  # NetworkPolicies — required when Docker-network isolation is enabled.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
   # ResourceQuotas — read-only, used to inject requests.cpu/memory when the
   # namespace quota enforces them (Docker has no concept of ResourceQuotas)
@@ -120,6 +120,12 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Namespace is cluster-scoped. Restrict startup connectivity access to the
+  # configured workload namespace. Change d2k here if you change D2K_NAMESPACE.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["d2k"]
+    verbs: ["get"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
@@ -189,6 +195,16 @@ spec:
               value: "true"   # set to "false" to run in Docker host mode instead
             - name: D2K_LOG_LEVEL
               value: "info"
+            # Optional Docker-network-equivalent isolation. Pod and Service
+            # CIDRs are cluster-specific, so the generic manifest leaves it off.
+            - name: D2K_NETWORK_ISOLATION
+              value: "false"
+            - name: D2K_POD_CIDRS
+              value: ""   # e.g. "10.240.0.0/16"
+            - name: D2K_SERVICE_CIDRS
+              value: ""   # e.g. "10.241.0.0/16"
+            - name: D2K_REJECT_HOST_NETWORK
+              value: "true"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
             # D2K_TLS_CERT_FILE and D2K_TLS_KEY_FILE are not set here — they
             # default to /etc/d2k/tls/tls.crt and /etc/d2k/tls/tls.key which
