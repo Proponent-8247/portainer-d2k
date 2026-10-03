@@ -435,39 +435,56 @@ func (a *KubernetesDockerAdapter) serviceNetworkDetail(ctx context.Context, netw
 // RemoveNetwork removes a d2k-managed network by name or ID.
 // Built-in networks (bridge, host, none) return an error matching Docker behaviour.
 func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID string) error {
-	if a.networkIsolation {
-		if err := a.restorePersistedNetworks(ctx); err != nil {
-			return err
+	if !a.networkIsolation {
+		switch nameOrID {
+		case "bridge", "host", "none":
+			return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
 		}
+
+		a.networksMu.Lock()
+		defer a.networksMu.Unlock()
+
+		if _, ok := a.networks[nameOrID]; ok {
+			delete(a.networks, nameOrID)
+			return nil
+		}
+		for netName, network := range a.networks {
+			if network.ID == nameOrID {
+				delete(a.networks, netName)
+				return nil
+			}
+		}
+		return nil
+	}
+
+	if err := a.restorePersistedNetworks(ctx); err != nil {
+		return err
 	}
 
 	network, found := a.lookupNetwork(nameOrID)
 	if !found {
-		// Docker treats removing an already-absent network as idempotent.
 		return nil
 	}
 	if a.isBuiltinNetwork(network) {
 		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", network.Name)
 	}
 
-	if a.networkIsolation {
-		users, err := a.networkInUse(ctx, network.ID)
-		if err != nil {
-			return fmt.Errorf("unable to determine whether network %q is in use: %w", network.Name, err)
-		}
-		if len(users) > 0 {
-			return fmt.Errorf("network %q has active endpoints (%s); disconnect or remove those workloads first", network.Name, strings.Join(users, ", "))
-		}
+	users, err := a.networkInUse(ctx, network.ID)
+	if err != nil {
+		return fmt.Errorf("unable to determine whether network %q is in use: %w", network.Name, err)
+	}
+	if len(users) > 0 {
+		return fmt.Errorf("network %q has active endpoints (%s); disconnect or remove those workloads first", network.Name, strings.Join(users, ", "))
+	}
 
-		// Delete the derived policy first. If deleting persistent source state
-		// fails afterward, a later restore can safely recreate the policy.
-		if err := a.deleteNetworkIsolationPolicy(ctx, network.ID); err != nil {
-			return fmt.Errorf("unable to delete isolation policy for network %q: %w", network.Name, err)
-		}
-		if err := a.deletePersistedNetwork(ctx, network); err != nil {
-			_ = a.ensureNetworkIsolationPolicy(ctx, network)
-			return fmt.Errorf("unable to delete persisted state for network %q: %w", network.Name, err)
-		}
+	// Delete the derived policy first. If deleting persistent source state
+	// fails afterward, a later restore can safely recreate the policy.
+	if err := a.deleteNetworkIsolationPolicy(ctx, network.ID); err != nil {
+		return fmt.Errorf("unable to delete isolation policy for network %q: %w", network.Name, err)
+	}
+	if err := a.deletePersistedNetwork(ctx, network); err != nil {
+		_ = a.ensureNetworkIsolationPolicy(ctx, network)
+		return fmt.Errorf("unable to delete persisted state for network %q: %w", network.Name, err)
 	}
 
 	a.networksMu.Lock()
