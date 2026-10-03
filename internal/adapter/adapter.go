@@ -140,6 +140,12 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 	return a, nil
 }
 
+// NetworkIsolationEnabled reports whether persisted/enforced Docker network
+// semantics are active for this adapter.
+func (a *KubernetesDockerAdapter) NetworkIsolationEnabled() bool {
+	return a.networkIsolation
+}
+
 // apiServerHost extracts the bare hostname or IP from a Kubernetes API server
 // URL (e.g. "https://10.0.0.1:6443" -> "10.0.0.1").
 func apiServerHost(rawURL string) string {
