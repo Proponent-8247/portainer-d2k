@@ -103,9 +103,11 @@ func filterNetworksByLabel(networks []adapter.NetworkSummary, rawFilters string)
 
 // createBody mirrors the Docker network create request body.
 type createBody struct {
-	Name   string            `json:"Name"`
-	Driver string            `json:"Driver"`
-	Labels map[string]string `json:"Labels"`
+	Name       string            `json:"Name"`
+	Driver     string            `json:"Driver"`
+	Labels     map[string]string `json:"Labels"`
+	Internal   bool              `json:"Internal"`
+	Attachable bool              `json:"Attachable"`
 }
 
 // Create handles POST /networks/create.
@@ -117,9 +119,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	network, warnings, err := h.adapter.CreateNetwork(r.Context(), adapter.CreateNetworkOptions{
-		Name:   body.Name,
-		Driver: body.Driver,
-		Labels: body.Labels,
+		Name:       body.Name,
+		Driver:     body.Driver,
+		Labels:     body.Labels,
+		Internal:   body.Internal,
+		Attachable: body.Attachable,
 	})
 	if err != nil {
 		h.logger.Errorw("CreateNetwork failed", "name", body.Name, "error", err)
@@ -169,4 +173,33 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 func networkIDFromPath(path string) string {
 	parts := strings.Split(strings.TrimPrefix(path, "/networks/"), "/")
 	return parts[0]
+}
+
+type connectBody struct {
+	Container string `json:"Container"`
+}
+
+func (h *Handler) DispatchPost(w http.ResponseWriter, r *http.Request) {
+	nameOrID := networkIDFromPath(r.URL.Path)
+	var body connectBody
+	if err := httputils.ParseJSON(r, &body); err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/connect"):
+		if err := h.adapter.ConnectNetwork(r.Context(), nameOrID, body.Container); err != nil {
+			httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case strings.HasSuffix(r.URL.Path, "/disconnect"):
+		if err := h.adapter.DisconnectNetwork(r.Context(), nameOrID, body.Container); err != nil {
+			httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

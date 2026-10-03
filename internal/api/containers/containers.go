@@ -53,7 +53,7 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/attach"):
 		h.Attach(w, r)
 	case strings.HasSuffix(path, "/rename"):
-    h.Rename(w, r)
+		h.Rename(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -151,6 +151,7 @@ type createBody struct {
 	Labels       map[string]string   `json:"Labels"`
 	ExposedPorts map[string]struct{} `json:"ExposedPorts"`
 	HostConfig   struct {
+		NetworkMode  string `json:"NetworkMode"`
 		PortBindings map[string][]struct {
 			HostIP   string `json:"HostIp"`
 			HostPort string `json:"HostPort"`
@@ -161,6 +162,11 @@ type createBody struct {
 			Capabilities [][]string `json:"Capabilities"`
 		} `json:"DeviceRequests"`
 	} `json:"HostConfig"`
+	NetworkingConfig struct {
+		EndpointsConfig map[string]struct {
+			NetworkID string `json:"NetworkID"`
+		} `json:"EndpointsConfig"`
+	} `json:"NetworkingConfig"`
 }
 
 // Create handles POST /containers/create (docker run — create phase).
@@ -207,6 +213,18 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var networkRefs []string
+	for networkName, endpoint := range body.NetworkingConfig.EndpointsConfig {
+		if endpoint.NetworkID != "" {
+			networkRefs = append(networkRefs, endpoint.NetworkID)
+		} else {
+			networkRefs = append(networkRefs, networkName)
+		}
+	}
+	if len(networkRefs) == 0 && body.HostConfig.NetworkMode != "" && body.HostConfig.NetworkMode != "default" {
+		networkRefs = append(networkRefs, body.HostConfig.NetworkMode)
+	}
+
 	opts := adapter.RunOptions{
 		Name:         name,
 		Image:        body.Image,
@@ -217,6 +235,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		PortBindings: portBindings,
 		PublishAll:   body.HostConfig.PublishAllPorts,
 		GPUCount:     gpuCount,
+		Networks:     networkRefs,
 	}
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
