@@ -81,6 +81,36 @@ func managedDeployment(name string, networkIDs ...string) *appsv1.Deployment {
 	}
 }
 
+func TestCreateNetworkPreservesLegacySyntheticModeWhenIsolationDisabled(t *testing.T) {
+	a := &KubernetesDockerAdapter{
+		namespace: "d2k-workloads",
+		networks:  map[string]*NetworkSummary{},
+	}
+
+	network, warnings, err := a.CreateNetwork(context.Background(), CreateNetworkOptions{
+		Name:       "demo_frontend",
+		Driver:     "macvlan",
+		Internal:   true,
+		Attachable: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateNetwork returned error with isolation disabled: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected legacy flat-network warning")
+	}
+	if network.Driver != "overlay" || network.Scope != "swarm" {
+		t.Fatalf("legacy synthetic network changed driver/scope: %#v", network)
+	}
+	if network.Internal || network.Attachable {
+		t.Fatalf("legacy synthetic network unexpectedly adopted isolation-only flags: %#v", network)
+	}
+	if network.Labels["com.docker.compose.project"] != "demo" ||
+		network.Labels["com.docker.compose.network"] != "frontend" {
+		t.Fatalf("legacy Compose labels were not preserved: %#v", network.Labels)
+	}
+}
+
 func TestNetworkMutationRequiresIsolation(t *testing.T) {
 	a := &KubernetesDockerAdapter{}
 
