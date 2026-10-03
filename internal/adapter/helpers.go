@@ -38,6 +38,16 @@ func managedSelector(name string) map[string]string {
 	}
 }
 
+// workloadSelector preserves the existing app-only Service selector when
+// isolation is disabled. Isolation mode also requires d2k ownership so an
+// unrelated Pod cannot be selected by a translated Service.
+func (a *KubernetesDockerAdapter) workloadSelector(name string) map[string]string {
+	if a.networkIsolation {
+		return managedSelector(name)
+	}
+	return map[string]string{"app": name}
+}
+
 // Kubernetes label values must be 63 chars max, match [A-Za-z0-9._-]*,
 // and start/end with an alphanumeric character.
 func sanitiseLabelValue(v string) (string, bool) {
