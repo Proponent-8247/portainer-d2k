@@ -120,7 +120,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	// ClusterIP Services with an empty ports list but headless Services are allowed
 	// without ports and still register the DNS name for short-name resolution.
 	clusterSpec := corev1.ServiceSpec{
-		Selector: managedSelector(opts.Name),
+		Selector: a.workloadSelector(opts.Name),
 		Ports:    clusterPorts,
 	}
 	if len(clusterPorts) == 0 {
@@ -516,9 +516,17 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
 	for k, v := range opts.Labels {
+		if a.networkIsolation && strings.HasPrefix(k, types.LabelPrefix+"/") {
+			continue
+		}
 		if clean, ok := sanitiseLabelValue(v); ok {
 			labels[k] = clean
 		}
+	}
+	if a.networkIsolation {
+		labels[types.LabelManagedBy] = types.LabelManagedByValue
+		labels[types.LabelWorkloadName] = opts.Name
+		labels["app"] = opts.Name
 	}
 
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
@@ -647,7 +655,7 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
-			Selector: managedSelector(name),
+			Selector: a.workloadSelector(name),
 			Ports:    ports,
 		},
 	}, nil
