@@ -625,11 +625,13 @@ func dockerHealthStatus(d appsv1.Deployment, runtimeState workloadRuntimeState) 
 	if err != nil || !healthcheckEnabled(hc) {
 		return "", 0
 	}
+	if !runtimeState.Running {
+		return "", 0
+	}
 	if runtimeState.Ready {
 		return dockertypes.Healthy, 0
 	}
-	if !runtimeState.Running || runtimeState.StartedAt.IsZero() ||
-		len(d.Spec.Template.Spec.Containers) == 0 {
+	if runtimeState.StartedAt.IsZero() || len(d.Spec.Template.Spec.Containers) == 0 {
 		return dockertypes.Starting, 0
 	}
 
