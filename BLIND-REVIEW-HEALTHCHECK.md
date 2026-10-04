@@ -45,14 +45,14 @@
 - [x] Upgrade/migration behavior
 - [x] Interactions with existing non-health functionality
 - [x] Test-suite adequacy and missing negative/lifecycle/concurrency cases
-- [ ] Static validation
-- [ ] `go mod tidy` diff
-- [ ] `go build ./...`
-- [ ] `go test ./...`
-- [ ] `go vet ./...`
-- [ ] `go test -race ./...`
-- [ ] Portainer normal PR multi-architecture OCI build
-- [ ] Freeze blind findings
+- [x] Static validation
+- [x] `go mod tidy` diff
+- [x] `go build ./...`
+- [x] `go test ./...`
+- [x] `go vet ./...`
+- [x] `go test -race ./...`
+- [x] Portainer normal PR multi-architecture OCI build (executed; normal job fails due HC-BR-019)
+- [x] Freeze blind findings
 - [ ] Reconcile against prior audit only after freeze
 
 ## Findings
@@ -480,9 +480,88 @@ Timeout with no output and timeout after partial stdout/stderr.
 
 **Validation status:** confirmed against `moby/moby v27.3.1 daemon/health.go`.
 
+
+### HC-BR-018 — LOW — exact pinned candidate is not gofmt-clean
+
+**Evidence**
+
+An exact-SHA GitHub Actions validation explicitly checked out `6e7d77eaca67e5684b35012714553fde81bdae39`. `gofmt -l .` reported 13 files:
+
+- `internal/adapter/adapter.go`
+- `internal/adapter/container.go`
+- `internal/adapter/events.go`
+- `internal/adapter/helpers.go`
+- `internal/adapter/metrics.go`
+- `internal/adapter/swarm.go`
+- `internal/adapter/volume.go`
+- `internal/api/containers/containers.go`
+- `internal/api/exec/exec.go`
+- `internal/api/images/images.go`
+- `internal/api/networks/networks.go`
+- `internal/api/system/system.go`
+- `internal/middleware/middleware.go`
+
+This is not a health semantic defect, but it fails the requested formatting gate and is upstream-PR cleanup.
+
+**Affected behavior**
+
+Formatting/maintainer acceptance only.
+
+**Proposed remediation**
+
+Run `gofmt` on the reported files in a dedicated formatting-only commit or limit the formatting patch to files genuinely modified by the candidate if upstream prefers avoiding unrelated churn.
+
+**Tests that should be added**
+
+CI should fail with the file list when `gofmt -l` is non-empty.
+
+**Validation status:** reproduced on exact pinned SHA in workflow run `37235040312`.
+
+### HC-BR-019 — MEDIUM — repository's normal PR multi-architecture build job is broken before Dockerfile execution
+
+**Evidence**
+
+The existing candidate-associated PR workflow run `37223631986` passed its Go remediation-validation job but its normal multi-architecture image job failed before reading the Dockerfile. The build action used a remote Git context:
+
+`https://github.com/Proponent-8247/portainer-d2k.git#refs/pull/6/merge`
+
+BuildKit reported that the repository does not contain `refs/pull/6/merge`. GitHub's Actions checkout can fetch that synthetic PR ref, but an unauthenticated/ordinary remote Git context cannot assume the synthetic ref is advertised.
+
+A separate exact-SHA validation using a checked-out local context successfully built the pinned candidate for `linux/amd64,linux/arm64`, showing the failure is CI plumbing rather than the candidate Dockerfile/buildability.
+
+**Affected behavior**
+
+Normal upstream-style PR CI, multi-architecture OCI validation, PR submission readiness.
+
+**Proposed remediation**
+
+Use the already checked-out workspace (`context: .`) or a remotely advertised commit SHA/branch as the BuildKit context instead of a synthetic `refs/pull/*/merge` remote ref.
+
+**Tests that should be added**
+
+Keep the PR multi-arch job required and ensure it builds from the same checked-out revision that the validation job verifies.
+
+**Validation status:** reproduced in normal PR run `37223631986`; local-context exact-SHA multi-arch build passes in run `37235040312`.
+
 ## Validation status
 
-Static review remains in progress. Exact-pinned CI metadata exists but its logs/results have intentionally not yet been inspected, to keep validation from biasing the independent static review.
+Validation completed after static findings were committed.
+
+Exact pinned validation was arranged through temporary draft PR #7 / workflow `blind-healthcheck-pinned-validation`. The workflow explicitly checked out `6e7d77eaca67e5684b35012714553fde81bdae39` and verified that exact HEAD before running gates.
+
+- [x] exact candidate SHA verified
+- [ ] formatting — FAIL: `gofmt -l .` reports 13 files (HC-BR-018)
+- [x] `go mod tidy` diff — PASS
+- [x] `go build ./...` — PASS
+- [x] `go test ./...` — PASS
+- [x] `go vet ./...` — PASS
+- [x] `go test -race ./...` — PASS
+- [x] exact-SHA multi-architecture OCI build (`linux/amd64,linux/arm64`) — PASS using checked-out local context
+- [ ] repository normal PR multi-architecture job — FAIL before Dockerfile execution due remote synthetic PR ref context (HC-BR-019)
+
+Exact-SHA validation workflow run: `37235040312`.
+
+Normal PR workflow run inspected after static review: `37223631986`.
 
 ## Review log
 
@@ -503,3 +582,11 @@ Reviewed restart history scope and growth, task slot synthesis, failed-task rete
 Completed the independent static review of the pinned candidate, including changed implementation and tests, indirectly affected container/Swarm API paths, Docker 27.3.1 health semantics, SwarmKit restart semantics, Kubernetes lifecycle/readiness, concurrency, persistence, networking, atomicity, RBAC, malformed metadata, and multi-replica behavior.
 
 The current blind finding set is HC-BR-001 through HC-BR-017. Validation has not yet been used as a source of findings. `AUDIT-HEALTHCHECK.md` has not been read or searched.
+
+### Checkpoint 005 — validation complete; blind finding list frozen
+
+Exact-SHA validation completed after the static review. HC-BR-018 and HC-BR-019 were added from validation evidence.
+
+**Frozen blind finding set:** HC-BR-001 through HC-BR-019.
+
+No finding above will be deleted or rewritten during reconciliation. Any comparison to the prior audit will be added separately. At this checkpoint, `AUDIT-HEALTHCHECK.md` still has not been read, searched, or inspected.
