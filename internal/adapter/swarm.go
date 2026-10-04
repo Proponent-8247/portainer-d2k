@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	dockertypes "github.com/docker/docker/api/types"
 	dockcontainer "github.com/docker/docker/api/types/container"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1359,7 +1360,7 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 		for slot := int32(1); slot <= desired; slot++ {
 			if p, ok := podsBySlot[slot]; ok {
 				nodeID := nodeSwarmIDs[p.Spec.NodeName]
-				result = append(result, kubePodToSwarmTask(p, svcID, nodeID, int(slot)))
+				result = append(result, kubePodToSwarmTask(p, svcID, nodeID, int(slot), a.healthStateForPod(p)))
 			} else {
 				// Pod not yet scheduled - synthesise a preparing task.
 				result = append(result, map[string]any{
@@ -1414,7 +1415,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectTask(ctx context.Context, id strin
 	}
 	for _, p := range pods.Items {
 		if swarmID(string(p.UID)) == id || string(p.UID) == id || p.Name == id {
-			return kubePodToSwarmTask(p, "", "", 0), nil
+			return kubePodToSwarmTask(p, "", "", 0, a.healthStateForPod(p)), nil
 		}
 	}
 	return nil, fmt.Errorf("task %q not found", id)
@@ -2116,7 +2117,7 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context,
 			if p.Status.Phase != corev1.PodRunning {
 				continue
 			}
-			if deploymentHasTranslatedHealthcheck(d) && !swarmTargetContainerReady(p) {
+			if deploymentHasTranslatedHealthcheck(d) && !podHealthConditionReady(p) {
 				continue
 			}
 			nodeIP := p.Status.HostIP
@@ -2238,10 +2239,10 @@ func swarmTargetContainerStatus(p corev1.Pod) (*corev1.ContainerStatus, bool) {
 }
 
 func swarmTargetHasHealthcheck(p corev1.Pod) bool {
-	name := swarmTargetContainerName(p)
-	for i := range p.Spec.Containers {
-		if p.Spec.Containers[i].Name == name {
-			return p.Spec.Containers[i].ReadinessProbe != nil
+	gateType := corev1.PodConditionType(types.HealthReadinessGate)
+	for _, gate := range p.Spec.ReadinessGates {
+		if gate.ConditionType == gateType {
+			return true
 		}
 	}
 	return false
@@ -2252,7 +2253,7 @@ func swarmTargetContainerReady(p corev1.Pod) bool {
 	return ok && status.State.Running != nil && status.Ready
 }
 
-func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int) map[string]any {
+func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int, health *dockertypes.Health) map[string]any {
 	// Swarm health semantics belong to the service container, not arbitrary
 	// injected sidecars. A task with a translated health check stays "starting"
 	// until that target container is ready. Missing ContainerStatuses is also
@@ -2264,8 +2265,17 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 	case corev1.PodRunning:
 		if !hasTargetStatus || targetStatus.State.Running == nil {
 			state = "starting"
-		} else if swarmTargetHasHealthcheck(p) && !targetStatus.Ready {
-			state = "starting"
+		} else if swarmTargetHasHealthcheck(p) {
+			switch {
+			case health == nil:
+				state = "starting"
+			case health.Status == dockertypes.Healthy:
+				state = "running"
+			case health.Status == dockertypes.Unhealthy:
+				state = "failed"
+			default:
+				state = "starting"
+			}
 		} else {
 			state = "running"
 		}
@@ -2283,6 +2293,9 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 		"ExitCode":    0,
 	}
 	statusErr := p.Status.Message
+	if health != nil && health.Status == dockertypes.Unhealthy && statusErr == "" {
+		statusErr = "container unhealthy"
+	}
 	if hasTargetStatus {
 		containerStatus["ContainerID"] = targetStatus.ContainerID
 		if targetStatus.State.Terminated != nil {
