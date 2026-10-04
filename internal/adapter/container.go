@@ -35,6 +35,7 @@ type RunOptions struct {
 	ExposedPorts map[string]struct{}
 	Volumes      []string
 	GPUCount     int
+	Healthcheck  *container.HealthConfig
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -77,10 +78,11 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	}
 
 	// Build and create the Deployment.
-	deployment, err := a.buildDeployment(ctx, opts, kind, mappings)
+	deployment, healthWarnings, err := a.buildDeployment(ctx, opts, kind, mappings)
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
+	warnings = append(warnings, healthWarnings...)
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
@@ -293,7 +295,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 
 // --- builders ---
 
-func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
+func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, []string, error) {
 	labels := managedLabels(opts.Name)
 	for k, v := range opts.Labels {
 		if clean, ok := sanitiseLabelValue(v); ok {
@@ -303,11 +305,19 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	annotations := map[string]string{
 		types.AnnotationPortMappings: portAnnotation,
 		types.AnnotationImageRef:     opts.Image,
+	}
+
+	readinessProbe, _, healthWarnings, err := buildHealthProbes(opts.Healthcheck, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := annotateHealthcheck(annotations, opts.Healthcheck); err != nil {
+		return nil, nil, err
 	}
 
 	serviceTypeLabel := types.ServiceTypeNone
@@ -350,7 +360,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 		Limits: resourceLimits,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	replicas := int32(1)
@@ -378,18 +388,19 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:    opts.Name,
-							Image:   opts.Image,
-							Command: opts.Cmd,
-							Env:     envVars,
-							Ports:   containerPorts,
-							Resources: resourceReqs,
+							Name:           opts.Name,
+							Image:          opts.Image,
+							Command:        opts.Cmd,
+							Env:            envVars,
+							Ports:          containerPorts,
+							Resources:      resourceReqs,
+							ReadinessProbe: readinessProbe,
 						},
 					},
 				},
 			},
 		},
-	}, nil
+	}, healthWarnings, nil
 }
 
 func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*corev1.Service, error) {
