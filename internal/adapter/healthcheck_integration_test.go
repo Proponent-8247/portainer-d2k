@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	dockertypes "github.com/docker/docker/api/types"
 	dockcontainer "github.com/docker/docker/api/types/container"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,7 +70,7 @@ func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 	if inspect.Config == nil || !reflect.DeepEqual(inspect.Config.Healthcheck, hc) {
 		t.Fatalf("inspect healthcheck = %#v, want %#v", inspect.Config, hc)
 	}
-	if inspect.State == nil || inspect.State.Health == nil || inspect.State.Health.Status != dockcontainer.Healthy {
+	if inspect.State == nil || inspect.State.Health == nil || inspect.State.Health.Status != dockertypes.Healthy {
 		t.Fatalf("inspect health state = %#v, want healthy", inspect.State)
 	}
 }
