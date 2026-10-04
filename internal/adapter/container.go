@@ -729,7 +729,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string, runtimeState wo
 			state.Health = &dockertypes.Health{
 				Status:        dockertypes.Starting,
 				FailingStreak: 0,
-				Log:           []*container.HealthcheckResult{},
+				Log:           []*dockertypes.HealthcheckResult{},
 			}
 		}
 	}
