@@ -35,7 +35,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker stats` | Kubernetes metrics API (falls back to zeroes if unavailable) |
 | `docker events` | Kubernetes resource watch + event history |
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
-| Docker healthcheck | Kubernetes readiness exec probe |
+| Docker healthcheck | d2k Docker-compatible health monitor using pod exec |
 
 ---
 
@@ -55,7 +55,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Worker node | Non-control-plane node |
 | Swarm leader | Control-plane node serving the Kubernetes API (matched by IP) |
 | Overlay network | Synthetic (namespace network is flat) |
-| Healthcheck | Kubernetes readiness + liveness exec probes |
+| Healthcheck | d2k health monitor + Swarm readiness gate / task replacement |
 
 Swarm IDs are derived deterministically from Kubernetes UIDs so they are stable across d2k restarts. The cluster identity is stored in a ConfigMap (`d2k-identity`) in the target namespace.
 
@@ -95,7 +95,7 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 ### Partially supported
 
-**Health checks** — explicit Docker/Compose health checks are translated to Kubernetes exec probes, with documented differences around image inheritance, start-period timing, and Swarm task replacement semantics.
+**Health checks** — explicit Docker/Compose health checks run through d2k's Docker-compatible monitor. Swarm VIP services are readiness-gated and health-triggered replacement honors the supported restart-policy fields. `dnsrr` / `publish mode=host` with health checks is rejected because Kubernetes `hostPort` cannot be safely withdrawn on health failure.
 
 **NFS volumes** — volumes with `driver_opts.type: nfs` are supported when the cluster has `nfs.csi.k8s.io` installed with a StorageClass whose `parameters.server` matches the `addr=` value in the compose `driver_opts.o`. d2k locates the matching StorageClass automatically and creates a `ReadWriteMany` PVC using it. If no matching StorageClass is found, the deploy is blocked with an error indicating exactly what is required. Other NFS provisioners (e.g. `nfs-subdir-external-provisioner`) are not supported for automatic matching because their server address is not stored in the StorageClass spec.
 
@@ -122,22 +122,24 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 ## Health checks
 
-d2k translates explicit Docker health checks supplied through `docker run`, `docker service`, or Compose/stack service specifications into Kubernetes exec probes.
+d2k runs explicit Docker health checks supplied through `docker run`, `docker service`, or Compose/stack service specifications with a d2k-owned monitor rather than Kubernetes liveness/readiness exec probes. This keeps Docker's health state machine authoritative instead of inferring Docker health from kubelet readiness.
 
-- `CMD` health checks become direct Kubernetes exec commands.
-- `CMD-SHELL` health checks run through `/bin/sh -c`. Docker can use image-specific shell metadata; d2k does not inspect that metadata, so non-default image shell behavior is not reproduced. Kubernetes exec probes also start from `/`, so health checks that depend on an image/container working directory should use absolute paths.
-- `NONE` disables the translated probe.
-- Standalone containers receive a readiness probe only. The generated Services publish not-ready addresses so health status does not remove an unhealthy standalone container from Docker-style DNS or published-port reachability.
-- Swarm services receive both readiness and liveness probes. Readiness gates service traffic and liveness restarts the Kubernetes container after the configured failure threshold. This approximates Swarm task replacement, but the Pod/task identity is not replaced and the health command is executed independently by both probes.
-- The first translated probe is delayed by one health interval when no `start_period` is configured, matching Docker's normal first-check delay as closely as Kubernetes whole-second timing permits.
-- Kubernetes probe timing is whole-second precision. Docker durations below one second are rounded up after Docker's 1 ms minimum-duration validation.
-- `start_period` is approximated with Kubernetes `initialDelaySeconds`. Kubernetes does not run the probe during that delay, whereas Docker runs checks during its start period and can become healthy before the period expires. Kubernetes probe workers still run on `periodSeconds`, so when the normal interval is longer than the start period the first translated check can occur later than the configured start period.
-- `start_interval` is retained in Docker API readback but has no exact Kubernetes probe equivalent. d2k currently advertises Docker API 1.41, while the Docker CLI gates `--health-start-interval` at API 1.44, so normally negotiated 1.41 CLI sessions will not send that option even though raw requests are accepted.
-- `docker inspect` health status is derived from Kubernetes readiness while the workload Pod exists. Probe output/history is not available through the Kubernetes Pod status, so Docker's health log is not reproduced, the reported failing streak is only a threshold-level approximation, and historical health state is not retained after the workload is stopped.
-- Raw API health configs with an unknown test discriminator are preserved for inspect/readback but are not translated into a Kubernetes probe, matching Docker's behavior of not starting a monitor for an unknown type.
-- This patch does not add server-side `docker ps --filter health=...` filtering or synthesize Docker `health_status` events. The health state is exposed through the normal `docker ps` status text and `docker inspect` state.
+- `CMD` health checks are executed directly in the target container with the supplied argv preserved literally. In particular, Kubernetes-style `$(VAR)` expansion is not applied.
+- `CMD-SHELL` health checks run through `/bin/sh -c`. Docker can use image-specific `SHELL` metadata; d2k does not inspect image metadata, so non-default image shell behavior is not reproduced.
+- `NONE` disables health monitoring. Unknown raw API test discriminators are retained for inspect/readback but do not start a monitor, matching Docker's no-monitor behavior.
+- Docker's `interval`, `timeout`, `retries`, `start_period`, and `start_interval` behavior is maintained by d2k. The normal interval is scheduled after each completed check; start-period failures do not advance the failing streak; the default start interval is 5 seconds.
+- Health-command process exit failures and pod-exec/infrastructure failures both count as failed Docker health results. d2k retains the last five results, including output (capped at 4096 bytes), timestamps, exit code, and exact failing streak for `docker inspect`.
+- Standalone containers expose Docker health state without using Kubernetes readiness to remove the container from network reachability.
+- Swarm VIP services receive a custom Pod readiness gate controlled by d2k. A task remains `starting` until its target container is healthy; an injected sidecar cannot make the service task healthy.
+- An unhealthy Swarm task is marked failed and removed from VIP service readiness. For health-triggered replacement, d2k honors restart condition (`none`, `on-failure`, `any`), delay, `MaxAttempts`, and restart window. Replacement is performed by deleting the failed Pod so the Deployment creates a new Pod/task identity.
+- `dnsrr` and `publish mode=host` are rejected when an active health check is configured. Kubernetes `hostPort` remains directly reachable regardless of Pod readiness, so accepting this combination would silently violate the health-routing contract.
+- The monitor reconciles live Pods continuously. A d2k process restart reconstructs monitors from Deployment annotations and running Pods; health status begins at `starting` again until the next check.
+- Kubernetes limits total object annotations to 256 KiB. d2k validates the encoded health metadata before creating/updating Kubernetes resources and rejects unrepresentable configurations as bad Docker input.
+- This feature does not add server-side `docker ps --filter health=...` filtering or synthesize Docker `health_status` events.
 
-Docker merges zero-valued health settings with image `HEALTHCHECK` metadata before applying daemon defaults. d2k does not inspect container-image metadata. If the API request asks to inherit an image-defined health command, d2k returns a warning and does not invent one; when an explicit command is present but timing/retry values are zero, d2k uses Docker daemon defaults rather than unknown image-specific values.
+Docker merges zero-valued health settings with image `HEALTHCHECK` metadata before daemon defaults are applied. d2k does not inspect container-image metadata. If a request only asks to inherit an image-defined health command, d2k returns a warning and does not invent one; when an explicit command is present but timing/retry values are zero, d2k uses Docker daemon defaults rather than unknown image-specific values.
+
+d2k currently advertises Docker API 1.41. The Docker CLI gates `--health-start-interval` at API 1.44, so normally negotiated 1.41 CLI sessions do not send that flag even though raw API requests containing `StartInterval` are accepted.
 
 ---
 
@@ -340,7 +342,8 @@ Docker host mode requires namespace-scoped permissions only.
 | Resource | Verbs |
 |---|---|
 | deployments | get, list, watch, create, update, patch, delete |
-| pods | get, list, watch |
+| pods | get, list, watch, delete _(delete is used for health-triggered Swarm task replacement)_ |
+| pods/status | get, update, patch _(Swarm health readiness gate)_ |
 | pods/log | get |
 | pods/exec | create |
 | services | get, list, watch, create, update, patch, delete |
