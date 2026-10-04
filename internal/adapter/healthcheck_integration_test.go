@@ -301,6 +301,10 @@ func TestDockerHealthStatusTransitionsToUnhealthy(t *testing.T) {
 	if healthy != dockertypes.Healthy || streak != 0 {
 		t.Fatalf("ready health status = %q/%d, want healthy/0", healthy, streak)
 	}
+	stopped, streak := dockerHealthStatus(deployment, workloadRuntimeState{})
+	if stopped != "" || streak != 0 {
+		t.Fatalf("stopped health status = %q/%d, want omitted/0", stopped, streak)
+	}
 }
 
 func TestSwarmReadbackOmitsAbsentHealthcheck(t *testing.T) {
