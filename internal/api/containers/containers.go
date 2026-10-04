@@ -22,6 +22,7 @@ import (
 
 	"go.uber.org/zap"
 
+	dockcontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
@@ -150,6 +151,7 @@ type createBody struct {
 	Env          []string            `json:"Env"`
 	Labels       map[string]string   `json:"Labels"`
 	ExposedPorts map[string]struct{} `json:"ExposedPorts"`
+	Healthcheck  *dockcontainer.HealthConfig `json:"Healthcheck"`
 	HostConfig   struct {
 		PortBindings map[string][]struct {
 			HostIP   string `json:"HostIp"`
@@ -217,6 +219,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		PortBindings: portBindings,
 		PublishAll:   body.HostConfig.PublishAllPorts,
 		GPUCount:     gpuCount,
+		Healthcheck:   body.Healthcheck,
 	}
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
