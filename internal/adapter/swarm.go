@@ -941,6 +941,61 @@ func (a *KubernetesDockerAdapter) SwarmInspectService(ctx context.Context, id st
 // SwarmUpdateService handles scale / image / env updates via a full service spec replace.
 // Docker CLI sends the full ServiceSpec on every update (same as kubectl apply).
 // The version query param is advisory only - we don't enforce it but we don't reject it.
+func applySwarmServiceUpdate(target *appsv1.Deployment, spec swarmServiceSpec) ([]string, error) {
+	if len(target.Spec.Template.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("service %q has no workload container", target.Name)
+	}
+	if target.Annotations == nil {
+		target.Annotations = map[string]string{}
+	}
+
+	// Docker sends a complete ServiceSpec for service update. Preserve d2k's
+	// existing field semantics while applying them to a fresh object on every
+	// optimistic-concurrency retry.
+	cs := spec.TaskTemplate.ContainerSpec
+	container := &target.Spec.Template.Spec.Containers[0]
+
+	if cs.Image != "" {
+		container.Image = cs.Image
+		target.Annotations[types.AnnotationImageRef] = cs.Image
+	}
+
+	if len(cs.Env) > 0 {
+		var envVars []corev1.EnvVar
+		for _, e := range cs.Env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
+			}
+		}
+		container.Env = envVars
+	}
+
+	readinessProbe, livenessProbe, healthWarnings, err := buildHealthProbes(cs.Healthcheck, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := annotateHealthcheck(target.Annotations, cs.Healthcheck); err != nil {
+		return nil, err
+	}
+	container.ReadinessProbe = readinessProbe
+	container.LivenessProbe = livenessProbe
+
+	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
+		r := int32(spec.Mode.Replicated.Replicas)
+		target.Spec.Replicas = &r
+		target.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", r)
+	}
+
+	delete(target.Annotations, "d2k.portainer.io/update-in-progress")
+	delete(target.Annotations, "d2k.portainer.io/update-requested")
+
+	return healthWarnings, nil
+}
+
+// SwarmUpdateService handles scale / image / env updates via a full service spec replace.
+// Docker CLI sends the full ServiceSpec on every update (same as kubectl apply).
+// The version query param is advisory only - we don't enforce it but we don't reject it.
 func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id string, body io.Reader) ([]string, error) {
 	var spec swarmServiceSpec
 	if err := json.NewDecoder(body).Decode(&spec); err != nil {
@@ -966,71 +1021,34 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		return nil, fmt.Errorf("service %q not found", id)
 	}
 
-	// Apply updates - only patch the fields the spec carries.
-	cs := spec.TaskTemplate.ContainerSpec
-	if cs.Image != "" {
-		target.Spec.Template.Spec.Containers[0].Image = cs.Image
-		target.Annotations[types.AnnotationImageRef] = cs.Image
-	}
-
-	if len(cs.Env) > 0 {
-		var envVars []corev1.EnvVar
-		for _, e := range cs.Env {
-			parts := strings.SplitN(e, "=", 2)
-			if len(parts) == 2 {
-				envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
-			}
-		}
-		target.Spec.Template.Spec.Containers[0].Env = envVars
-	}
-
-	readinessProbe, livenessProbe, healthWarnings, healthErr := buildHealthProbes(cs.Healthcheck, true)
-	if healthErr != nil {
-		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", id, healthErr)
-	}
-	if target.Annotations == nil {
-		target.Annotations = map[string]string{}
-	}
-	if err := annotateHealthcheck(target.Annotations, cs.Healthcheck); err != nil {
-		return nil, err
-	}
-	target.Spec.Template.Spec.Containers[0].ReadinessProbe = readinessProbe
-	target.Spec.Template.Spec.Containers[0].LivenessProbe = livenessProbe
-
-	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
-		r := int32(spec.Mode.Replicated.Replicas)
-		target.Spec.Replicas = &r
-		// Cache desired replica count in annotation so ServiceInspect returns
-		// the correct value immediately, before Kubernetes propagates the update.
-		// Note: 0 is valid here — scale-to-zero is an explicit user action.
-		target.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", r)
-	}
-
-	// Don't set any update annotations - let task polling drive convergence.
-	// Kubernetes reconciles the scale immediately, so all pods will be
-	// running by the time the CLI polls tasks. The progress loop exits
-	// naturally once running == replicas.
-	if target.Annotations == nil {
-		target.Annotations = map[string]string{}
-	}
-	delete(target.Annotations, "d2k.portainer.io/update-in-progress")
-	delete(target.Annotations, "d2k.portainer.io/update-requested")
-
+	var healthWarnings []string
 	for attempt := 0; attempt < 5; attempt++ {
-		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, target, metav1.UpdateOptions{})
+		candidate := target.DeepCopy()
+		var applyErr error
+		healthWarnings, applyErr = applySwarmServiceUpdate(candidate, spec)
+		if applyErr != nil {
+			return nil, fmt.Errorf("invalid healthcheck for service %q: %w", id, applyErr)
+		}
+
+		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, candidate, metav1.UpdateOptions{})
 		if err == nil {
 			return healthWarnings, nil
 		}
 		if !errors.IsConflict(err) {
 			return healthWarnings, fmt.Errorf("unable to update service %q: %w", id, err)
 		}
-		// Re-fetch on conflict and re-apply.
+
+		// A conflict means another actor changed the Deployment after our read.
+		// Re-fetch and reapply the complete requested mutation before retrying;
+		// retrying the fresh object unmodified would silently report success
+		// while dropping the user's update.
 		fresh, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, target.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return healthWarnings, getErr
 		}
 		target = fresh
 	}
+
 	return healthWarnings, fmt.Errorf("unable to update service %q: too many conflicts", id)
 }
 
