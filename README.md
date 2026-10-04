@@ -35,6 +35,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker stats` | Kubernetes metrics API (falls back to zeroes if unavailable) |
 | `docker events` | Kubernetes resource watch + event history |
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
+| Docker healthcheck | Kubernetes readiness exec probe |
 
 ---
 
@@ -54,6 +55,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Worker node | Non-control-plane node |
 | Swarm leader | Control-plane node serving the Kubernetes API (matched by IP) |
 | Overlay network | Synthetic (namespace network is flat) |
+| Healthcheck | Kubernetes readiness + liveness exec probes |
 
 Swarm IDs are derived deterministically from Kubernetes UIDs so they are stable across d2k restarts. The cluster identity is stored in a ConfigMap (`d2k-identity`) in the target namespace.
 
@@ -89,6 +91,8 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Service inspection by ID** — `docker service inspect <ID>` works with the full ID, any unique prefix (matching Docker CLI behaviour), or the service name.
 
+**Health checks** — explicit Docker/Compose health checks are translated to Kubernetes exec probes. Standalone containers use readiness only; Swarm services use readiness plus liveness so failed health checks can restart the task-equivalent container.
+
 **Uptime formatting** — `docker ps` STATUS column shows human-readable uptime (e.g. `8 days`) rather than raw duration.
 
 ### Partially supported
@@ -97,7 +101,6 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Global mode services** — `deploy.mode: global` is deployed as replicated with a warning. True DaemonSet translation is not implemented.
 
-**Health checks** — `healthcheck:` in a service spec is not translated to a Kubernetes readiness or liveness probe.
 
 **Resource limits** — `deploy.resources.limits` and `deploy.resources.reservations` are translated to Kubernetes resource limits and requests.
 
@@ -114,6 +117,24 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 **Bind mounts from host paths** — `volumes:` entries using host path syntax (e.g. `./data:/app/data`) are translated to hostPath volumes. This will only work if the path exists on the Kubernetes node where the pod is scheduled, which is generally unreliable in a multi-node cluster.
 
 **macvlan / ipvlan networks** — not supported. See the Networking section.
+
+---
+
+## Health checks
+
+d2k translates explicit Docker health checks supplied through `docker run`, `docker service`, or Compose/stack service specifications into Kubernetes exec probes.
+
+- `CMD` health checks become direct Kubernetes exec commands.
+- `CMD-SHELL` health checks run through `/bin/sh -c`.
+- `NONE` disables the translated probe.
+- Standalone containers receive a readiness probe only. Docker Engine health status does not by itself restart a standalone container, so d2k does not add liveness semantics there.
+- Swarm services receive both readiness and liveness probes. This approximates Swarm behavior where a task that fails its health check is replaced.
+- Docker's default `interval=30s`, `timeout=30s`, and `retries=3` are used when an explicit health command omits those values.
+- Kubernetes probe timing is whole-second precision. Sub-second Docker durations are rounded up to one second.
+- `start_period` is approximated with Kubernetes `initialDelaySeconds`. Kubernetes does not run the probe during that delay, whereas Docker can run checks during its start period and end the start period early after a success.
+- `start_interval` is retained in Docker API readback but has no exact Kubernetes probe equivalent.
+
+d2k does not inspect container-image metadata. If the Docker API request asks to inherit an image-defined `HEALTHCHECK` without providing the check command, d2k cannot reconstruct that image health check and returns a warning instead of inventing one.
 
 ---
 
