@@ -8,9 +8,9 @@ Recovered patch head at audit start: `8e63ba3b7a01fb884846c2b00b79215fb1839044`
 
 ## Stage
 
-Stage 2 — audit and edge-case review.
+Stage 2.5 — remediation complete.
 
-Functional fixes are intentionally deferred until the audit is complete.
+All findings from the Stage 2 audit have been remediated and validated. The branch is ready to be frozen for Stage 3 blind review.
 
 ## Review progress
 
@@ -26,24 +26,47 @@ Functional fixes are intentionally deferred until the audit is complete.
 - [x] Review concurrency/restart/readiness edge cases.
 - [x] Review tests for blind spots and missing failure cases.
 - [x] Run complete build/test/vet/race validation after audit findings are recorded.
+- [x] Remediate every HC-AUD finding.
+- [x] Add targeted regression coverage for each remediated behavior.
+- [x] Re-run strict exact-head validation after the final remediation test.
 
 ## Remediation ledger
 
 GitHub Issues are disabled for this repository, so this committed file is the authoritative remediation ledger.
 
+**Current totals:** Open: **0** · In progress: **0** · Fixed: **11**
+
 | Finding | Status | Remediation |
 |---|---|---|
-| HC-AUD-001 | IN PROGRESS | d2k-owned Docker state machine implemented; exact streak regression coverage added; validation pending. |
-| HC-AUD-002 | FIXED (pending validation) | Full service mutation is reapplied after every conflict refetch; regression test added. |
-| HC-AUD-003 | IN PROGRESS | API/task health gating implemented; physical hostPort reachability still requires fail-closed handling or equivalent before closure. |
-| HC-AUD-004 | FIXED (pending validation) | Swarm task state now uses the named target container plus d2k health state; sidecar/empty-status tests added. |
-| HC-AUD-005 | IN PROGRESS | Kubelet liveness removed; d2k restart controller implements condition/delay/MaxAttempts/window and replacement pod identity; validation/documentation pending. |
-| HC-AUD-006 | IN PROGRESS | d2k monitor now schedules from end of each check and implements Docker start interval/period behavior; validation pending. |
-| HC-AUD-007 | FIXED (pending validation) | Swarm health validation now precedes quota/mount/PVC/resource mutation; no-side-effect regression test added. |
-| HC-AUD-008 | IN PROGRESS | d2k monitor maps pod-exec infrastructure errors to Docker failure results; regression coverage added; validation pending. |
-| HC-AUD-009 | FIXED (pending validation) | Total annotation payload is checked before mutation and oversized health configs return ErrInvalidHealthcheck. |
-| HC-AUD-010 | FIXED (pending validation) | Runtime lookup derives the workload identity from the Deployment pod template; rename regression test added. |
-| HC-AUD-011 | IN PROGRESS | Health commands now use direct pod exec, bypassing kubelet probe expansion; literal argv regression coverage added; validation pending. |
+| HC-AUD-001 | **FIXED** | d2k-owned Docker health state machine tracks exact failing streak/log state rather than inferring it from Kubernetes readiness. Regression: `TestDockerHealthStateTracksExactFailingStreak`. |
+| HC-AUD-002 | **FIXED** | Swarm update reapplies the complete requested mutation after every Kubernetes conflict refetch. Regression: `TestSwarmUpdateReappliesHealthcheckAfterConflict`. |
+| HC-AUD-003 | **FIXED — fail closed** | Healthchecked Swarm `dnsrr` / `publish mode=host` combinations are rejected before mutation because hostPort reachability cannot be withdrawn on health failure. Create/update regressions cover both paths. |
+| HC-AUD-004 | **FIXED** | Swarm task state is derived from the named d2k target container plus d2k-owned health state; empty status and ready sidecars cannot promote an unhealthy task. |
+| HC-AUD-005 | **FIXED** | Kubelet liveness restart behavior was removed. d2k now owns health-triggered Swarm task replacement and honors restart condition, delay, MaxAttempts, and window; replacement deletes the failed Pod so a new Pod/task identity is created. |
+| HC-AUD-006 | **FIXED** | d2k health monitor schedules Docker intervals after each completed check and implements start-period/start-interval behavior directly instead of relying on kubelet probe cadence. |
+| HC-AUD-007 | **FIXED** | Swarm health validation occurs before quota/mount/PVC/resource mutation. Regression verifies invalid health input leaves no PVC or Deployment side effects. |
+| HC-AUD-008 | **FIXED** | d2k executes health commands directly through Pod exec and converts process/infrastructure execution errors into Docker health failures, including exit-code/output retention. |
+| HC-AUD-009 | **FIXED** | Encoded HealthConfig plus existing annotation payload is checked against Kubernetes' 256 KiB annotation limit before mutation and rejected as `ErrInvalidHealthcheck`. |
+| HC-AUD-010 | **FIXED** | Runtime-state lookup derives workload identity from Deployment pod-template labels rather than assuming Deployment.Name; rename health-state regression added. |
+| HC-AUD-011 | **FIXED** | Direct Docker `CMD` health argv is passed through d2k Pod exec without kubelet `$(VAR)` command expansion; literal-argv regression added. |
+
+### Final remediation validation
+
+Validated functional head: `9247312765013e5753a8c49d6a42be68fb328cbf`
+
+Workflow run: `37223385396`
+
+All exact-head gates passed:
+
+- `gofmt` check;
+- strict `go mod tidy` diff check;
+- `go build ./...`;
+- `go test ./...`;
+- `go vet ./...`;
+- `go test -race ./...`;
+- Portainer normal pull-request multi-architecture OCI build for `linux/amd64` and `linux/arm64`.
+
+The findings below are retained as the historical Stage 2 audit record. The remediation ledger above is authoritative for current status.
 
 ## Findings
 
