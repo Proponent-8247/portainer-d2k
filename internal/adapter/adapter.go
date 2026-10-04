@@ -65,6 +65,7 @@ type KubernetesDockerAdapter struct {
 	healthStates   map[string]*dockerHealthState
 	healthMonitors map[string]context.CancelFunc
 	healthCancel   context.CancelFunc
+	healthExec     healthCommandExecFunc
 }
 
 // Options configures a new KubernetesDockerAdapter.
