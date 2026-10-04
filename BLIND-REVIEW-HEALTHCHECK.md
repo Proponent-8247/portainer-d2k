@@ -28,23 +28,23 @@
 
 ## Review areas remaining
 
-- [ ] Docker container health semantics
-- [ ] Docker API readback/list/inspect compatibility
-- [ ] Command execution semantics: CMD / CMD-SHELL / NONE / invalid discriminators
-- [ ] Timing semantics: interval / timeout / retries / start period / start interval / defaults / minimums
-- [ ] Health state machine: failing streak / logs / truncation / recovery / stopped and restarted containers
-- [ ] Swarm service/task semantics
-- [ ] Restart policy semantics and persistence
-- [ ] Kubernetes readiness/lifecycle/controller behavior
-- [ ] Monitor creation/cancellation/reconciliation/stale state
-- [ ] Concurrency and multi-process behavior
-- [ ] Networking/exposure and endpoint gating
-- [ ] Persistence/metadata limits and corruption handling
-- [ ] Atomicity / partial-mutation behavior
-- [ ] RBAC / security / malformed or oversized input
-- [ ] Upgrade/migration behavior
-- [ ] Interactions with existing non-health functionality
-- [ ] Test-suite adequacy and missing negative/lifecycle/concurrency cases
+- [x] Docker container health semantics
+- [x] Docker API readback/list/inspect compatibility
+- [x] Command execution semantics: CMD / CMD-SHELL / NONE / invalid discriminators
+- [x] Timing semantics: interval / timeout / retries / start period / start interval / defaults / minimums
+- [x] Health state machine: failing streak / logs / truncation / recovery / stopped and restarted containers
+- [x] Swarm service/task semantics
+- [x] Restart policy semantics and persistence
+- [x] Kubernetes readiness/lifecycle/controller behavior
+- [x] Monitor creation/cancellation/reconciliation/stale state
+- [x] Concurrency and multi-process behavior
+- [x] Networking/exposure and endpoint gating
+- [x] Persistence/metadata limits and corruption handling
+- [x] Atomicity / partial-mutation behavior
+- [x] RBAC / security / malformed or oversized input
+- [x] Upgrade/migration behavior
+- [x] Interactions with existing non-health functionality
+- [x] Test-suite adequacy and missing negative/lifecycle/concurrency cases
 - [ ] Static validation
 - [ ] `go mod tidy` diff
 - [ ] `go build ./...`
@@ -381,6 +381,105 @@ Either explicitly enforce/document single-active-instance operation or add Kuber
 
 **Validation status:** static design review confirmed.
 
+
+### HC-BR-014 — HIGH — old-container monitor can overwrite new-container health state and act on the restarted Pod
+
+**Evidence**
+
+- Monitor identity includes container ID, but API health state is keyed only by Pod UID.
+- When Kubernetes restarts the target container in the same Pod, reconciliation creates a new monitor for the new container ID and immediately stores a fresh `starting` state under the Pod UID.
+- The old monitor is then cancelled. If it was inside `runDockerHealthCommand`, cancellation causes that call to return, but `monitorDockerHealth` does not re-check `ctx.Done()` before applying and storing the result.
+- The cancelled old monitor can therefore overwrite the new container's state with a stale result.
+- For Swarm, that stale result is then processed by the old monitor's health-state switch. If it reaches `unhealthy`, the old monitor can write the readiness gate false and invoke health replacement against the Pod name even though the target container has already restarted with a different container ID.
+
+**Affected behavior**
+
+Container restart within the same Pod, stale state, Swarm readiness, task replacement, container identity.
+
+**Proposed remediation**
+
+Fence state publication and replacement actions by the exact monitor/container generation. After every probe returns, verify the monitor still owns the current Pod UID/container ID before mutating shared state, readiness, restart history, or Pod lifecycle. Cancellation must prevent post-cancel probe results from being committed.
+
+**Tests that should be added**
+
+- block an old-container probe, switch ContainerStatus to a new container ID, reconcile, then release/cancel the old probe;
+- assert old result cannot overwrite new `starting` state;
+- assert old unhealthy result cannot alter readiness or delete the Pod;
+- repeat under race detector.
+
+**Validation status:** static concurrency review confirmed.
+
+### HC-BR-015 — MEDIUM — image-inherited health checks and image health defaults are silently lost in normal create flows
+
+**Evidence**
+
+- Docker 27.3.1 merges image `Config.Healthcheck` into an incomplete user container config: if user health config is nil, the image healthcheck is inherited; if present but fields are zero/empty, individual Test/timing/retry fields inherit from the image.
+- d2k does not inspect image metadata. A nil healthcheck simply passes validation and creates no monitor, with no warning.
+- A non-nil healthcheck with an empty Test emits a warning, but cannot reconstruct the image command. Explicit commands with zero timing/retry fields use daemon defaults rather than image-specific values.
+- This is partially documented, but it remains a Docker API/Compose compatibility gap in a feature whose review scope explicitly includes inherited image health checks and defaults.
+
+**Affected behavior**
+
+Images with Dockerfile `HEALTHCHECK`, Compose services relying on image health configuration, partial health overrides.
+
+**Proposed remediation**
+
+Resolve image config metadata before finalizing container/service health configuration and perform Docker-equivalent field-by-field merge. If that is intentionally out of scope, return a clear warning for the nil/inheritance case too and narrow compatibility claims.
+
+**Tests that should be added**
+
+- nil request healthcheck + image healthcheck;
+- empty Test + image Test;
+- explicit Test + image interval/timeout/retries/start values;
+- `NONE` explicitly disables image healthcheck.
+
+**Validation status:** confirmed against `moby/moby v27.3.1 daemon/commit.go`.
+
+### HC-BR-016 — LOW — normal API 1.41 clients cannot configure StartInterval even though raw requests are accepted
+
+**Evidence**
+
+- d2k advertises Docker API `1.41`.
+- Docker's health start-interval option was introduced in a later API and the normal Docker CLI gates the option by negotiated API version.
+- The implementation accepts `HealthConfig.StartInterval` in raw JSON, but a normal negotiated 1.41 CLI session cannot exercise it.
+- The README documents this limitation, so this is a compatibility limitation rather than an undisclosed correctness bug.
+
+**Affected behavior**
+
+CLI/Compose accessibility of `StartInterval`, API-version fidelity.
+
+**Proposed remediation**
+
+Either raise the advertised API version only when the broader API surface is compatible enough to do so, or explicitly keep this as a documented limitation. Do not imply ordinary CLI support for start interval while advertising 1.41.
+
+**Tests that should be added**
+
+Client negotiation/CLI integration test showing whether `--health-start-interval` is accepted and transmitted.
+
+**Validation status:** static/API compatibility review confirmed.
+
+### HC-BR-017 — LOW — timeout result text does not match Docker's health-log diagnostics
+
+**Evidence**
+
+- Docker 27.3.1 returns an exit code of -1 with output beginning `Health check exceeded timeout (...)`, including any captured probe output.
+- d2k relies on Kubernetes exec returning an error after context deadline. It preserves captured output as-is, or uses the raw exec/context error string when output is empty.
+- Thus even aside from HC-BR-005's timeout-start semantic difference, inspect health logs do not reproduce Docker's timeout diagnostic.
+
+**Affected behavior**
+
+Health-log readback and operator diagnostics.
+
+**Proposed remediation**
+
+Detect the configured timeout path explicitly and synthesize Docker-compatible timeout output while retaining captured output within the same truncation rules.
+
+**Tests that should be added**
+
+Timeout with no output and timeout after partial stdout/stderr.
+
+**Validation status:** confirmed against `moby/moby v27.3.1 daemon/health.go`.
+
 ## Validation status
 
 Static review remains in progress. Exact-pinned CI metadata exists but its logs/results have intentionally not yet been inspected, to keep validation from biasing the independent static review.
@@ -398,3 +497,9 @@ Reviewed the pinned candidate's health monitor, container and Swarm translation 
 ### Checkpoint 003 — multi-replica / persistence / task identity pass
 
 Reviewed restart history scope and growth, task slot synthesis, failed-task retention, delayed replacement semantics, corrupted persisted metadata, and multi-instance operation. Additional findings follow.
+
+### Checkpoint 004 — static blind review complete
+
+Completed the independent static review of the pinned candidate, including changed implementation and tests, indirectly affected container/Swarm API paths, Docker 27.3.1 health semantics, SwarmKit restart semantics, Kubernetes lifecycle/readiness, concurrency, persistence, networking, atomicity, RBAC, malformed metadata, and multi-replica behavior.
+
+The current blind finding set is HC-BR-001 through HC-BR-017. Validation has not yet been used as a source of findings. `AUDIT-HEALTHCHECK.md` has not been read or searched.
