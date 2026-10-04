@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	dockerDefaultHealthInterval = 30 * time.Second
-	dockerDefaultHealthTimeout  = 30 * time.Second
-	dockerDefaultHealthRetries  = 3
+	dockerDefaultHealthInterval       = 30 * time.Second
+	dockerDefaultHealthTimeout        = 30 * time.Second
+	dockerDefaultHealthRetries        = 3
+	kubernetesAnnotationSizeLimitByte = 256 * 1024
 )
 
 // ErrInvalidHealthcheck identifies Docker health-check configuration that
@@ -217,6 +218,26 @@ func annotateHealthcheck(annotations map[string]string, hc *dockcontainer.Health
 	if err != nil {
 		return err
 	}
+
+	// Kubernetes limits the total size of all annotation keys and values on an
+	// object to 256 KiB. Validate before mutating the caller's map so an
+	// oversized Docker health command is rejected as bad input instead of
+	// surfacing later as an opaque Kubernetes deployment error.
+	total := len(types.AnnotationHealthcheck) + len(raw)
+	for k, v := range annotations {
+		if k == types.AnnotationHealthcheck {
+			continue
+		}
+		total += len(k) + len(v)
+	}
+	if total > kubernetesAnnotationSizeLimitByte {
+		return invalidHealthcheckf(
+			"encoded healthcheck annotations require %d bytes, exceeding Kubernetes maximum %d bytes",
+			total,
+			kubernetesAnnotationSizeLimitByte,
+		)
+	}
+
 	annotations[types.AnnotationHealthcheck] = raw
 	return nil
 }
