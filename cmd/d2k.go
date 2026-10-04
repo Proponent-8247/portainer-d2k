@@ -59,6 +59,13 @@ func main() {
 
 	a.LogNFSStorageClasses(context.Background())
 
+	healthCtx, stopHealth := context.WithCancel(context.Background())
+	a.StartHealthManager(healthCtx)
+	defer func() {
+		stopHealth()
+		a.StopHealthManager()
+	}()
+
 	handler := router.New(a, cfg.Namespace, cfg.SwarmMode, logger)
 
 	// Detect TLS: if both cert and key files exist, listen on TLSPort with TLS.
