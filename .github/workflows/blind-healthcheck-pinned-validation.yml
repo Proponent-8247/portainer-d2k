@@ -1,0 +1,68 @@
+name: blind-healthcheck-pinned-validation
+
+on:
+  push:
+    branches:
+      - blind-validation-healthcheck-6e7d77e
+
+permissions:
+  contents: read
+
+jobs:
+  exact-pinned-validation:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact pinned candidate
+        uses: actions/checkout@v4
+        with:
+          ref: 6e7d77eaca67e5684b35012714553fde81bdae39
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify exact SHA
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "6e7d77eaca67e5684b35012714553fde81bdae39"
+
+      - name: gofmt
+        shell: bash
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: Verify go mod tidy
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race
+        run: go test -race ./...
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch OCI
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=/tmp/d2k-image.tar
+          tags: d2k:blind-healthcheck-validation
