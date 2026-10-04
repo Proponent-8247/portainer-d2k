@@ -386,7 +386,8 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 			return nil, err
 		}
 		if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
-			runtimeState = workloadRuntimeState{Running: true, Ready: true}
+			runtimeState.Running = true
+			runtimeState.Ready = true
 		}
 	}
 
