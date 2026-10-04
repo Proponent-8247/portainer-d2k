@@ -9,6 +9,8 @@ import (
 	"time"
 
 	dockcontainer "github.com/docker/docker/api/types/container"
+
+	"github.com/portainer/d2k/internal/types"
 )
 
 func TestBuildHealthProbesStandaloneUsesReadinessOnly(t *testing.T) {
@@ -196,5 +198,44 @@ func TestBuildHealthProbesRejectsInvalidTest(t *testing.T) {
 		if _, _, _, err := buildHealthProbes(hc, false); err == nil {
 			t.Fatalf("expected error for %#v", hc)
 		}
+	}
+}
+
+
+func TestAnnotateHealthcheckRejectsOversizedPayloadWithoutMutation(t *testing.T) {
+	annotations := map[string]string{
+		"existing": "value",
+	}
+	hc := &dockcontainer.HealthConfig{
+		Test: []string{"CMD", strings.Repeat("x", kubernetesAnnotationSizeLimitByte)},
+	}
+
+	err := annotateHealthcheck(annotations, hc)
+	if err == nil {
+		t.Fatal("expected oversized healthcheck annotation to be rejected")
+	}
+	if !errors.Is(err, ErrInvalidHealthcheck) {
+		t.Fatalf("error %v is not classified as invalid healthcheck", err)
+	}
+	if _, exists := annotations[types.AnnotationHealthcheck]; exists {
+		t.Fatal("oversized healthcheck mutated annotation map before returning error")
+	}
+	if annotations["existing"] != "value" {
+		t.Fatalf("existing annotation changed: %#v", annotations)
+	}
+}
+
+func TestAnnotateHealthcheckAccountsForExistingAnnotations(t *testing.T) {
+	annotations := map[string]string{
+		"existing": strings.Repeat("x", kubernetesAnnotationSizeLimitByte-128),
+	}
+	hc := &dockcontainer.HealthConfig{
+		Test: []string{"CMD", strings.Repeat("y", 256)},
+	}
+
+	if err := annotateHealthcheck(annotations, hc); err == nil {
+		t.Fatal("expected total annotation payload limit to be enforced")
+	} else if !errors.Is(err, ErrInvalidHealthcheck) {
+		t.Fatalf("error %v is not classified as invalid healthcheck", err)
 	}
 }
