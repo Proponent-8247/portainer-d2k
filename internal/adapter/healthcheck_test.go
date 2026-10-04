@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestBuildHealthProbesStandaloneUsesReadinessOnly(t *testing.T) {
 	if !reflect.DeepEqual(readiness.Exec.Command, wantCommand) {
 		t.Fatalf("command = %#v, want %#v", readiness.Exec.Command, wantCommand)
 	}
-	if readiness.PeriodSeconds != 5 || readiness.TimeoutSeconds != 2 || readiness.FailureThreshold != 4 {
+	if readiness.InitialDelaySeconds != 5 || readiness.PeriodSeconds != 5 || readiness.TimeoutSeconds != 2 || readiness.FailureThreshold != 4 {
 		t.Fatalf("unexpected probe timing: %#v", readiness)
 	}
 }
@@ -55,7 +56,7 @@ func TestBuildHealthProbesSwarmAddsLiveness(t *testing.T) {
 	if !reflect.DeepEqual(readiness.Exec.Command, want) || !reflect.DeepEqual(liveness.Exec.Command, want) {
 		t.Fatalf("unexpected shell command: readiness=%#v liveness=%#v", readiness.Exec.Command, liveness.Exec.Command)
 	}
-	if readiness.PeriodSeconds != 30 || readiness.TimeoutSeconds != 30 || readiness.FailureThreshold != 3 {
+	if readiness.InitialDelaySeconds != 30 || readiness.PeriodSeconds != 30 || readiness.TimeoutSeconds != 30 || readiness.FailureThreshold != 3 {
 		t.Fatalf("Docker defaults were not applied: %#v", readiness)
 	}
 }
@@ -124,6 +125,50 @@ func TestHealthcheckAnnotationRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildHealthProbesPreservesCMDShellArguments(t *testing.T) {
+	hc := &dockcontainer.HealthConfig{
+		Test: []string{"CMD-SHELL", "printf '%s' \"$0\"", "arg-zero"},
+	}
+	readiness, _, _, err := buildHealthProbes(hc, false)
+	if err != nil {
+		t.Fatalf("buildHealthProbes: %v", err)
+	}
+	want := []string{"/bin/sh", "-c", "printf '%s' \"$0\"", "arg-zero"}
+	if !reflect.DeepEqual(readiness.Exec.Command, want) {
+		t.Fatalf("command = %#v, want %#v", readiness.Exec.Command, want)
+	}
+}
+
+func TestBuildHealthProbesMatchesDockerMinimumDurationValidation(t *testing.T) {
+	for _, hc := range []*dockcontainer.HealthConfig{
+		{Test: []string{"CMD", "true"}, Interval: time.Nanosecond},
+		{Test: []string{"CMD", "true"}, Timeout: time.Nanosecond},
+		{Test: []string{"CMD", "true"}, StartPeriod: time.Nanosecond},
+		{Test: []string{"CMD", "true"}, StartInterval: time.Nanosecond},
+	} {
+		if _, _, _, err := buildHealthProbes(hc, false); err == nil {
+			t.Fatalf("expected Docker minimum-duration error for %#v", hc)
+		}
+	}
+}
+
+func TestBuildHealthProbesRejectsOverflowDurations(t *testing.T) {
+	hc := &dockcontainer.HealthConfig{
+		Test:     []string{"CMD", "true"},
+		Interval: time.Duration(math.MaxInt64),
+	}
+	if _, _, _, err := buildHealthProbes(hc, false); err == nil {
+		t.Fatal("expected oversized duration to be rejected")
+	}
+}
+
+func TestBuildHealthProbesRejectsNonCanonicalTestType(t *testing.T) {
+	hc := &dockcontainer.HealthConfig{Test: []string{"cmd", "true"}}
+	if _, _, _, err := buildHealthProbes(hc, false); err == nil {
+		t.Fatal("expected lowercase healthcheck type to be rejected")
 	}
 }
 
