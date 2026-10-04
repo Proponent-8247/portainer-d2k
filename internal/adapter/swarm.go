@@ -1483,6 +1483,43 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 	return map[string]any{"ID": swarmID(string(created.UID))}, nil
 }
 
+func kubeSecretToSwarm(s corev1.Secret) map[string]any {
+	// Return the original Swarm name (which may contain underscores) so the
+	// Docker CLI can match it against the name in the compose file.
+	// We stored it in an annotation at create time; fall back to k8s name.
+	name := s.Name
+	if swarmName, ok := s.Annotations["d2k.portainer.io/swarm-name"]; ok && swarmName != "" {
+		name = swarmName
+	}
+	return map[string]any{
+		"ID":        swarmID(string(s.UID)),
+		"Version":   map[string]any{"Index": uint64(1)},
+		"CreatedAt": s.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
+		"UpdatedAt": s.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
+		"Spec": map[string]any{
+			"Name":   name,
+			"Labels": s.Labels,
+		},
+	}
+}
+
+func kubeConfigMapToSwarm(c corev1.ConfigMap) map[string]any {
+	name := c.Name
+	if swarmName, ok := c.Annotations["d2k.portainer.io/swarm-name"]; ok && swarmName != "" {
+		name = swarmName
+	}
+	return map[string]any{
+		"ID":        swarmID(string(c.UID)),
+		"Version":   map[string]any{"Index": uint64(1)},
+		"CreatedAt": c.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
+		"UpdatedAt": c.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
+		"Spec": map[string]any{
+			"Name":   name,
+			"Labels": c.Labels,
+		},
+	}
+}
+
 // SwarmListSecrets returns all d2k-managed Secrets.
 func (a *KubernetesDockerAdapter) SwarmListSecrets(ctx context.Context) ([]map[string]any, error) {
 	secrets, err := a.client.CoreV1().Secrets(a.namespace).List(ctx, metav1.ListOptions{
