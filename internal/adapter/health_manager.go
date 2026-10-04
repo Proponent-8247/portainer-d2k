@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -27,6 +28,15 @@ const (
 	dockerHealthMaxOutputBytes     = 4096
 	dockerDefaultSwarmRestartDelay = 5 * time.Second
 )
+
+type healthCommandExecFunc func(
+	ctx context.Context,
+	podName string,
+	containerName string,
+	command []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) error
 
 type dockerHealthState struct {
 	Health    dockertypes.Health
@@ -362,7 +372,11 @@ func (a *KubernetesDockerAdapter) runDockerHealthCommand(ctx context.Context, sp
 	defer cancel()
 
 	output := &healthOutputBuffer{limit: dockerHealthMaxOutputBytes}
-	err = a.execInPod(probeCtx, spec.PodName, spec.ContainerName, command, nil, output, output, false)
+	if a.healthExec != nil {
+		err = a.healthExec(probeCtx, spec.PodName, spec.ContainerName, command, output, output)
+	} else {
+		err = a.execInPod(probeCtx, spec.PodName, spec.ContainerName, command, nil, output, output, false)
+	}
 	result.End = time.Now()
 	result.Output = output.String()
 	if err == nil {
