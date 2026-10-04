@@ -337,6 +337,23 @@ func annotateSwarmRestartPolicy(annotations map[string]string, policy swarmHealt
 	return nil
 }
 
+func setSwarmHealthReadinessGate(podSpec *corev1.PodSpec, enabled bool) {
+	gateType := corev1.PodConditionType(types.HealthReadinessGate)
+	filtered := podSpec.ReadinessGates[:0]
+	for _, gate := range podSpec.ReadinessGates {
+		if gate.ConditionType != gateType {
+			filtered = append(filtered, gate)
+		}
+	}
+	podSpec.ReadinessGates = filtered
+	if enabled {
+		podSpec.ReadinessGates = append(podSpec.ReadinessGates, corev1.PodReadinessGate{
+			ConditionType: gateType,
+		})
+	}
+}
+
+
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
 // plus a LoadBalancer Service if ports are published.
 func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body io.Reader) (map[string]any, error) {
@@ -357,7 +374,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// Validate and translate health configuration before any mutating service
 	// preparation (notably fallback PVC creation). Invalid Docker input must
 	// fail atomically without leaving Kubernetes resources behind.
-	readinessProbe, livenessProbe, healthWarnings, err := buildHealthProbes(cs.Healthcheck, true)
+	healthWarnings, err := validateHealthcheckForMonitor(cs.Healthcheck)
 	if err != nil {
 		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
 	}
@@ -770,8 +787,6 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 							Resources:       resourceReqs,
 							VolumeMounts:    volumeMounts,
 							Ports:           hostPorts,
-							ReadinessProbe:  readinessProbe,
-							LivenessProbe:   livenessProbe,
 							ImagePullPolicy: corev1.PullAlways,
 						},
 					},
@@ -779,6 +794,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			},
 		},
 	}
+	setSwarmHealthReadinessGate(&deployment.Spec.Template.Spec, healthcheckEnabled(cs.Healthcheck))
 
 	// Stack label on pod template too, if present.
 	if stack, ok := baseLabels[types.LabelSwarmStack]; ok {
@@ -1016,15 +1032,19 @@ func applySwarmServiceUpdate(target *appsv1.Deployment, spec swarmServiceSpec) (
 		container.Env = envVars
 	}
 
-	readinessProbe, livenessProbe, healthWarnings, err := buildHealthProbes(cs.Healthcheck, true)
+	healthWarnings, err := validateHealthcheckForMonitor(cs.Healthcheck)
 	if err != nil {
 		return nil, err
 	}
 	if err := annotateHealthcheck(target.Annotations, cs.Healthcheck); err != nil {
 		return nil, err
 	}
-	container.ReadinessProbe = readinessProbe
-	container.LivenessProbe = livenessProbe
+	// Health state is owned by d2k. Remove legacy translated kubelet probes
+	// from earlier patch revisions and use a custom readiness gate for Swarm
+	// traffic admission instead.
+	container.ReadinessProbe = nil
+	container.LivenessProbe = nil
+	setSwarmHealthReadinessGate(&target.Spec.Template.Spec, healthcheckEnabled(cs.Healthcheck))
 
 	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
 		r := int32(spec.Mode.Replicated.Replicas)
