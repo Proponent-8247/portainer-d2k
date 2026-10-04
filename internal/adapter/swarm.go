@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	dockcontainer "github.com/docker/docker/api/types/container"
 	appsv1 "k8s.io/api/apps/v1"
@@ -268,10 +269,11 @@ type swarmServiceSpec struct {
 				MemoryBytes int64 `json:"MemoryBytes"`
 			} `json:"Reservations"`
 		} `json:"Resources"`
-		RestartPolicy struct {
+		RestartPolicy *struct {
 			Condition   string `json:"Condition"`   // none | on-failure | any
-			Delay       int64  `json:"Delay"`
+			Delay       int64  `json:"Delay"`       // nanoseconds
 			MaxAttempts int64  `json:"MaxAttempts"`
+			Window      int64  `json:"Window"`      // nanoseconds
 		} `json:"RestartPolicy"`
 		Placement struct {
 			Constraints []string `json:"Constraints"` // e.g. "node.role == worker"
@@ -299,6 +301,40 @@ type swarmServiceSpec struct {
 			PublishMode   string `json:"PublishMode"` // ingress | host
 		} `json:"Ports"`
 	} `json:"EndpointSpec"`
+}
+
+func normalizeSwarmHealthRestartPolicy(spec swarmServiceSpec) swarmHealthRestartPolicy {
+	policy := defaultSwarmHealthRestartPolicy()
+	raw := spec.TaskTemplate.RestartPolicy
+	if raw == nil {
+		return policy
+	}
+
+	switch strings.ToLower(strings.TrimSpace(raw.Condition)) {
+	case "", "any":
+		policy.Condition = "any"
+	case "on-failure", "failure":
+		policy.Condition = "on-failure"
+	case "none":
+		policy.Condition = "none"
+	default:
+		// Docker/Swarm normally validates this before it reaches an executor.
+		// Preserve d2k's tolerant API surface and fall back to Swarm's default.
+		policy.Condition = "any"
+	}
+	policy.Delay = time.Duration(raw.Delay)
+	policy.MaxAttempts = raw.MaxAttempts
+	policy.Window = time.Duration(raw.Window)
+	return policy
+}
+
+func annotateSwarmRestartPolicy(annotations map[string]string, policy swarmHealthRestartPolicy) error {
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		return fmt.Errorf("unable to encode Swarm restart policy: %w", err)
+	}
+	annotations[types.AnnotationSwarmRestartPolicy] = string(raw)
+	return nil
 }
 
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
@@ -329,6 +365,9 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 
 	deploymentAnnotations := map[string]string{
 		types.AnnotationImageRef: cs.Image,
+	}
+	if err := annotateSwarmRestartPolicy(deploymentAnnotations, normalizeSwarmHealthRestartPolicy(spec)); err != nil {
+		return nil, err
 	}
 	if err := annotateHealthcheck(deploymentAnnotations, cs.Healthcheck); err != nil {
 		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
@@ -948,6 +987,12 @@ func applySwarmServiceUpdate(target *appsv1.Deployment, spec swarmServiceSpec) (
 	if target.Annotations == nil {
 		target.Annotations = map[string]string{}
 	}
+	if err := annotateSwarmRestartPolicy(target.Annotations, normalizeSwarmHealthRestartPolicy(spec)); err != nil {
+		return nil, err
+	}
+	// A service-spec update is a new Swarm spec version; restart accounting for
+	// the old spec must not consume MaxAttempts for the new one.
+	delete(target.Annotations, types.AnnotationHealthRestartHistory)
 
 	// Docker sends a complete ServiceSpec for service update. Preserve d2k's
 	// existing field semantics while applying them to a fresh object on every
