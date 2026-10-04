@@ -493,3 +493,86 @@ func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 		t.Fatalf("disabled healthcheck was not preserved for readback: %#v", hc)
 	}
 }
+
+
+func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *testing.T) {
+	ctx := context.Background()
+	hc := &dockcontainer.HealthConfig{
+		Test:     []string{"CMD", "false"},
+		Interval: 5 * time.Second,
+		Retries:  3,
+	}
+	annotations := map[string]string{}
+	if err := annotateHealthcheck(annotations, hc); err != nil {
+		t.Fatalf("annotate healthcheck: %v", err)
+	}
+	readiness, _, _, err := buildHealthProbes(hc, false)
+	if err != nil {
+		t.Fatalf("build health probes: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "renamed",
+			Namespace:   "healthcheck-test",
+			Annotations: annotations,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(1),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						types.LabelManagedBy:    types.LabelManagedByValue,
+						types.LabelWorkloadName: "original",
+						"app":                   "original",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:           "original",
+						Image:          "busybox",
+						ReadinessProbe: readiness,
+					}},
+				},
+			},
+		},
+	}
+	started := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original-pod",
+			Namespace: "healthcheck-test",
+			Labels: map[string]string{
+				types.LabelManagedBy:    types.LabelManagedByValue,
+				types.LabelWorkloadName: "original",
+				"app":                   "original",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "original",
+				Ready: false,
+				State: corev1.ContainerState{
+					Running: &corev1.ContainerStateRunning{StartedAt: started},
+				},
+			}},
+		},
+	}
+
+	a := newHealthcheckTestAdapter()
+	a.client = fake.NewSimpleClientset(deployment, pod)
+
+	inspect, err := a.InspectContainer(ctx, "renamed")
+	if err != nil {
+		t.Fatalf("InspectContainer: %v", err)
+	}
+	if inspect.State == nil || !inspect.State.Running {
+		t.Fatalf("renamed running workload was reported stopped: %#v", inspect.State)
+	}
+	if inspect.State.Health == nil {
+		t.Fatalf("renamed healthchecked workload lost health state: %#v", inspect.State)
+	}
+}
+
+func int32Ptr(v int32) *int32 { return &v }
