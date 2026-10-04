@@ -937,10 +937,10 @@ func (a *KubernetesDockerAdapter) SwarmInspectService(ctx context.Context, id st
 // SwarmUpdateService handles scale / image / env updates via a full service spec replace.
 // Docker CLI sends the full ServiceSpec on every update (same as kubectl apply).
 // The version query param is advisory only - we don't enforce it but we don't reject it.
-func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id string, body io.Reader) error {
+func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id string, body io.Reader) ([]string, error) {
 	var spec swarmServiceSpec
 	if err := json.NewDecoder(body).Decode(&spec); err != nil {
-		return fmt.Errorf("invalid service update spec: %w", err)
+		return nil, fmt.Errorf("invalid service update spec: %w", err)
 	}
 
 	// Resolve the Deployment by swarm service ID or name.
@@ -948,7 +948,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
 	})
 	if err != nil {
-		return fmt.Errorf("unable to list deployments: %w", err)
+		return nil, fmt.Errorf("unable to list deployments: %w", err)
 	}
 
 	var target *appsv1.Deployment
@@ -959,7 +959,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("service %q not found", id)
+		return nil, fmt.Errorf("service %q not found", id)
 	}
 
 	// Apply updates - only patch the fields the spec carries.
@@ -980,20 +980,18 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		target.Spec.Template.Spec.Containers[0].Env = envVars
 	}
 
-	if cs.Healthcheck != nil {
-		readinessProbe, livenessProbe, _, healthErr := buildHealthProbes(cs.Healthcheck, true)
-		if healthErr != nil {
-			return fmt.Errorf("invalid healthcheck for service %q: %w", id, healthErr)
-		}
-		if target.Annotations == nil {
-			target.Annotations = map[string]string{}
-		}
-		if err := annotateHealthcheck(target.Annotations, cs.Healthcheck); err != nil {
-			return err
-		}
-		target.Spec.Template.Spec.Containers[0].ReadinessProbe = readinessProbe
-		target.Spec.Template.Spec.Containers[0].LivenessProbe = livenessProbe
+	readinessProbe, livenessProbe, healthWarnings, healthErr := buildHealthProbes(cs.Healthcheck, true)
+	if healthErr != nil {
+		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", id, healthErr)
 	}
+	if target.Annotations == nil {
+		target.Annotations = map[string]string{}
+	}
+	if err := annotateHealthcheck(target.Annotations, cs.Healthcheck); err != nil {
+		return nil, err
+	}
+	target.Spec.Template.Spec.Containers[0].ReadinessProbe = readinessProbe
+	target.Spec.Template.Spec.Containers[0].LivenessProbe = livenessProbe
 
 	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
 		r := int32(spec.Mode.Replicated.Replicas)
@@ -1017,19 +1015,19 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 	for attempt := 0; attempt < 5; attempt++ {
 		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, target, metav1.UpdateOptions{})
 		if err == nil {
-			return nil
+			return healthWarnings, nil
 		}
 		if !errors.IsConflict(err) {
-			return fmt.Errorf("unable to update service %q: %w", id, err)
+			return healthWarnings, fmt.Errorf("unable to update service %q: %w", id, err)
 		}
 		// Re-fetch on conflict and re-apply.
 		fresh, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, target.Name, metav1.GetOptions{})
 		if getErr != nil {
-			return getErr
+			return healthWarnings, getErr
 		}
 		target = fresh
 	}
-	return fmt.Errorf("unable to update service %q: too many conflicts", id)
+	return healthWarnings, fmt.Errorf("unable to update service %q: too many conflicts", id)
 }
 
 // SwarmDeleteService removes the Deployment and any associated k8s Service.
