@@ -43,14 +43,14 @@ func TestDockerHealthCommandCMDPreservesLiteralArgv(t *testing.T) {
 }
 
 func TestDockerHealthCommandCMDShellPreservesArguments(t *testing.T) {
-	command, disabled, warning, err := dockerHealthCommand([]string{"CMD-SHELL", "printf '%s' "$0"", "arg-zero"})
+	command, disabled, warning, err := dockerHealthCommand([]string{"CMD-SHELL", "printf '%s' \"$0\"", "arg-zero"})
 	if err != nil {
 		t.Fatalf("dockerHealthCommand: %v", err)
 	}
 	if disabled || warning != "" {
 		t.Fatalf("unexpected disabled/warning: %v %q", disabled, warning)
 	}
-	want := []string{"/bin/sh", "-c", "printf '%s' "$0"", "arg-zero"}
+	want := []string{"/bin/sh", "-c", "printf '%s' \"$0\"", "arg-zero"}
 	if !reflect.DeepEqual(command, want) {
 		t.Fatalf("command = %#v, want %#v", command, want)
 	}
