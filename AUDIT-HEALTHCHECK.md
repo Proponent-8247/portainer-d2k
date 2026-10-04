@@ -164,4 +164,26 @@ The current automated tests do not cover:
 
 These should become regression tests alongside fixes, except where a finding is accepted as a documented architectural limitation.
 
+### HC-AUD-009 — LOW — persisted HealthConfig can exceed the Kubernetes annotation-size limit
+
+d2k stores the complete Docker HealthConfig JSON in `d2k.portainer.io/healthcheck`. Kubernetes limits the total annotation payload on an object to 256 KiB.
+
+Docker health commands are not constrained to that Kubernetes metadata limit, so a sufficiently large `Healthcheck.Test` can pass d2k's health validation and then fail only when the Deployment is submitted to Kubernetes. The caller receives a generic deployment-creation failure rather than a Docker-style bad-request validation error.
+
+This is an uncommon edge case, but it is introduced specifically by using annotations for lossless Docker API readback.
+
+Recommended fix after audit: validate the encoded annotation size before any Kubernetes mutation and return `ErrInvalidHealthcheck` / HTTP 400 when the health metadata cannot fit safely, accounting for the Deployment's other annotations.
+
+### HC-AUD-010 — LOW — health runtime-state lookup breaks after `docker rename`
+
+`RenameContainer` deep-copies the Deployment and changes only the Deployment metadata name. The Pod template's d2k workload-name/app labels and container name remain keyed to the original container name.
+
+Health-aware inspect/list logic resolves the renamed Deployment and then requests runtime state under the *new* Deployment name, while `workloadRuntimeStates` indexes the Pod under the old d2k workload label.
+
+When the renamed workload is Ready, the current ReadyReplicas fallback masks the mismatch. During health startup or an unhealthy period, ReadyReplicas can be zero, so the renamed container can be reported as not running / omitted from normal `docker ps` even though its container process is still running.
+
+The underlying rename implementation has broader pre-existing naming/service limitations, but the health-state lookup adds a new visible failure mode.
+
+Recommended action after audit: either update the workload labels/container identity during rename, or derive health runtime lookup from the Deployment's actual Pod selector/workload label rather than assuming Deployment.Name.
+
 This file is updated during the audit so progress and findings survive chat interruption.
