@@ -102,7 +102,7 @@ func healthcheckEnabled(hc *dockcontainer.HealthConfig) bool {
 	if hc == nil || len(hc.Test) == 0 {
 		return false
 	}
-	return hc.Test[0] != "NONE"
+	return hc.Test[0] == "CMD" || hc.Test[0] == "CMD-SHELL"
 }
 
 func validateDockerHealthcheck(hc *dockcontainer.HealthConfig) error {
@@ -153,7 +153,9 @@ func dockerHealthCommand(test []string) (command []string, disabled bool, warnin
 		command = append(command, test[1:]...)
 		return command, false, "", nil
 	default:
-		return nil, false, "", invalidHealthcheckf("unsupported Docker healthcheck test form %q", test[0])
+		return nil, false,
+			fmt.Sprintf("unknown Docker healthcheck test type %q is preserved for API readback but not translated", test[0]),
+			nil
 	}
 }
 
