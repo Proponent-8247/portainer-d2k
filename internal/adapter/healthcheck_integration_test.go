@@ -34,6 +34,7 @@ func newHealthcheckTestAdapter() *KubernetesDockerAdapter {
 	}
 }
 
+
 func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
@@ -56,14 +57,8 @@ func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 		t.Fatalf("unexpected warnings: %#v", warnings)
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
-	if container.ReadinessProbe == nil {
-		t.Fatal("standalone healthcheck did not create readiness probe")
-	}
-	if container.LivenessProbe != nil {
-		t.Fatal("standalone healthcheck must not create liveness probe")
-	}
-	if !reflect.DeepEqual(container.ReadinessProbe.Exec.Command, []string{"test", "-f", "/tmp/ready"}) {
-		t.Fatalf("unexpected readiness command: %#v", container.ReadinessProbe.Exec.Command)
+	if container.ReadinessProbe != nil || container.LivenessProbe != nil {
+		t.Fatalf("standalone healthcheck must be owned by d2k monitor, got readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
 	}
 
 	stored, err := decodeHealthcheckAnnotation(deployment.Annotations[types.AnnotationHealthcheck])
@@ -74,7 +69,12 @@ func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 		t.Fatalf("stored healthcheck = %#v, want %#v", stored, hc)
 	}
 
-	inspect := deploymentToContainerJSON(*deployment, "", workloadRuntimeState{Running: true, Ready: true})
+	health := &dockertypes.Health{Status: dockertypes.Healthy, FailingStreak: 0}
+	inspect := deploymentToContainerJSON(*deployment, "", workloadRuntimeState{
+		Running: true,
+		Ready:   true,
+		Health:  health,
+	})
 	if inspect.Config == nil || !reflect.DeepEqual(inspect.Config.Healthcheck, hc) {
 		t.Fatalf("inspect healthcheck = %#v, want %#v", inspect.Config, hc)
 	}
@@ -82,6 +82,7 @@ func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 		t.Fatalf("inspect health state = %#v, want healthy", inspect.State)
 	}
 }
+
 
 func TestSwarmHealthcheckWiresIntoCreateAndReadback(t *testing.T) {
 	ctx := context.Background()
@@ -112,14 +113,12 @@ func TestSwarmHealthcheckWiresIntoCreateAndReadback(t *testing.T) {
 		t.Fatalf("get deployment: %v", err)
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
-	if container.ReadinessProbe == nil || container.LivenessProbe == nil {
-		t.Fatalf("Swarm healthcheck probes missing: readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+	if container.ReadinessProbe != nil || container.LivenessProbe != nil {
+		t.Fatalf("Swarm healthcheck must be owned by d2k monitor, got readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
 	}
-	wantCommand := []string{"/bin/sh", "-c", "test -f /tmp/ready"}
-	if !reflect.DeepEqual(container.ReadinessProbe.Exec.Command, wantCommand) ||
-		!reflect.DeepEqual(container.LivenessProbe.Exec.Command, wantCommand) {
-		t.Fatalf("unexpected Swarm probe command: readiness=%#v liveness=%#v",
-			container.ReadinessProbe.Exec.Command, container.LivenessProbe.Exec.Command)
+	if len(deployment.Spec.Template.Spec.ReadinessGates) != 1 ||
+		deployment.Spec.Template.Spec.ReadinessGates[0].ConditionType != corev1.PodConditionType(types.HealthReadinessGate) {
+		t.Fatalf("Swarm healthcheck readiness gate missing: %#v", deployment.Spec.Template.Spec.ReadinessGates)
 	}
 
 	service := a.deploymentToSwarmService(ctx, *deployment)
@@ -253,62 +252,7 @@ func TestWorkloadRuntimeStateIgnoresForeignPodsAndSidecars(t *testing.T) {
 	}
 }
 
-func TestDockerHealthStatusTransitionsToUnhealthy(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{
-		Test:     []string{"CMD", "false"},
-		Interval: 5 * time.Second,
-		Retries:  3,
-	}
-	annotations := map[string]string{}
-	if err := annotateHealthcheck(annotations, hc); err != nil {
-		t.Fatalf("annotateHealthcheck: %v", err)
-	}
-	readiness, _, _, err := buildHealthProbes(hc, false)
-	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	deployment := appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
-		Spec: appsv1.DeploymentSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "web", ReadinessProbe: readiness}},
-				},
-			},
-		},
-	}
 
-	starting, streak := dockerHealthStatus(deployment, workloadRuntimeState{
-		Running:   true,
-		Ready:     false,
-		StartedAt: time.Now().Add(-6 * time.Second),
-	})
-	if starting != dockertypes.Starting || streak != 0 {
-		t.Fatalf("early health status = %q/%d, want starting/0", starting, streak)
-	}
-
-	unhealthy, streak := dockerHealthStatus(deployment, workloadRuntimeState{
-		Running:   true,
-		Ready:     false,
-		StartedAt: time.Now().Add(-16 * time.Second),
-	})
-	if unhealthy != dockertypes.Unhealthy || streak != 3 {
-		t.Fatalf("late health status = %q/%d, want unhealthy/3", unhealthy, streak)
-	}
-
-	healthy, streak := dockerHealthStatus(deployment, workloadRuntimeState{
-		Running:   true,
-		Ready:     true,
-		StartedAt: time.Now().Add(-time.Minute),
-	})
-	if healthy != dockertypes.Healthy || streak != 0 {
-		t.Fatalf("ready health status = %q/%d, want healthy/0", healthy, streak)
-	}
-	stopped, streak := dockerHealthStatus(deployment, workloadRuntimeState{})
-	if stopped != "" || streak != 0 {
-		t.Fatalf("stopped health status = %q/%d, want omitted/0", stopped, streak)
-	}
-}
 
 func TestSwarmReadbackOmitsAbsentHealthcheck(t *testing.T) {
 	ctx := context.Background()
@@ -334,47 +278,8 @@ func TestSwarmReadbackOmitsAbsentHealthcheck(t *testing.T) {
 	}
 }
 
-func TestDockerHealthStatusUsesKubernetesProbeTickSchedule(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{
-		Test:        []string{"CMD", "false"},
-		Interval:    30 * time.Second,
-		StartPeriod: 5 * time.Second,
-		Retries:     3,
-	}
-	annotations := map[string]string{}
-	if err := annotateHealthcheck(annotations, hc); err != nil {
-		t.Fatalf("annotateHealthcheck: %v", err)
-	}
-	readiness, _, _, err := buildHealthProbes(hc, false)
-	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	deployment := appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
-		Spec: appsv1.DeploymentSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "web", ReadinessProbe: readiness}},
-				},
-			},
-		},
-	}
 
-	status, _ := dockerHealthStatus(deployment, workloadRuntimeState{
-		Running:   true,
-		StartedAt: time.Now().Add(-65 * time.Second),
-	})
-	if status != dockertypes.Starting {
-		t.Fatalf("health status at 65s = %q, want starting until third 30s probe tick", status)
-	}
-	status, streak := dockerHealthStatus(deployment, workloadRuntimeState{
-		Running:   true,
-		StartedAt: time.Now().Add(-91 * time.Second),
-	})
-	if status != dockertypes.Unhealthy || streak != 3 {
-		t.Fatalf("health status at 91s = %q/%d, want unhealthy/3", status, streak)
-	}
-}
+
 
 func TestSwarmUpdateCanRemoveHealthcheck(t *testing.T) {
 	ctx := context.Background()
@@ -411,14 +316,18 @@ func TestSwarmUpdateCanRemoveHealthcheck(t *testing.T) {
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
 	if container.ReadinessProbe != nil || container.LivenessProbe != nil {
-		t.Fatalf("removed healthcheck left stale probes: readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+		t.Fatalf("removed healthcheck left legacy probes: readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+	}
+	if len(deployment.Spec.Template.Spec.ReadinessGates) != 0 {
+		t.Fatalf("removed healthcheck left readiness gate: %#v", deployment.Spec.Template.Spec.ReadinessGates)
 	}
 	if _, exists := deployment.Annotations[types.AnnotationHealthcheck]; exists {
 		t.Fatalf("removed healthcheck left stale annotation: %#v", deployment.Annotations)
 	}
 }
 
-func TestSwarmUpdateReturnsHealthcheckWarnings(t *testing.T) {
+
+func TestSwarmUpdateUsesNativeDockerStartTimingWithoutApproximationWarnings(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
 
@@ -447,10 +356,20 @@ func TestSwarmUpdateReturnsHealthcheckWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SwarmUpdateService: %v", err)
 	}
-	if len(warnings) != 2 {
-		t.Fatalf("expected start-period/start-interval warnings, got %#v", warnings)
+	if len(warnings) != 0 {
+		t.Fatalf("d2k-owned monitor should not emit Kubernetes timing approximation warnings: %#v", warnings)
+	}
+
+	deployment, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated deployment: %v", err)
+	}
+	if len(deployment.Spec.Template.Spec.ReadinessGates) != 1 ||
+		deployment.Spec.Template.Spec.ReadinessGates[0].ConditionType != corev1.PodConditionType(types.HealthReadinessGate) {
+		t.Fatalf("healthcheck update did not add readiness gate: %#v", deployment.Spec.Template.Spec.ReadinessGates)
 	}
 }
+
 
 func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 	ctx := context.Background()
@@ -486,7 +405,10 @@ func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
 	if container.ReadinessProbe != nil || container.LivenessProbe != nil {
-		t.Fatalf("NONE healthcheck did not remove probes: readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+		t.Fatalf("NONE healthcheck left legacy probes: readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+	}
+	if len(deployment.Spec.Template.Spec.ReadinessGates) != 0 {
+		t.Fatalf("NONE healthcheck left readiness gate: %#v", deployment.Spec.Template.Spec.ReadinessGates)
 	}
 	hc, err := decodeHealthcheckAnnotation(deployment.Annotations[types.AnnotationHealthcheck])
 	if err != nil {
@@ -509,10 +431,6 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 	if err := annotateHealthcheck(annotations, hc); err != nil {
 		t.Fatalf("annotate healthcheck: %v", err)
 	}
-	readiness, _, _, err := buildHealthProbes(hc, false)
-	if err != nil {
-		t.Fatalf("build health probes: %v", err)
-	}
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -532,9 +450,8 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:           "original",
-						Image:          "busybox",
-						ReadinessProbe: readiness,
+						Name:  "original",
+						Image: "busybox",
 					}},
 				},
 			},
@@ -545,6 +462,7 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "original-pod",
 			Namespace: "healthcheck-test",
+			UID:       "original-pod-uid",
 			Labels: map[string]string{
 				types.LabelManagedBy:    types.LabelManagedByValue,
 				types.LabelWorkloadName: "original",
@@ -554,8 +472,9 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{{
-				Name:  "original",
-				Ready: false,
+				Name:        "original",
+				ContainerID: "containerd://abc",
+				Ready:       true,
 				State: corev1.ContainerState{
 					Running: &corev1.ContainerStateRunning{StartedAt: started},
 				},
@@ -565,6 +484,11 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 
 	a := newHealthcheckTestAdapter()
 	a.client = fake.NewSimpleClientset(deployment, pod)
+	a.storeDockerHealthState(string(pod.UID), &dockerHealthState{
+		Health:    dockertypes.Health{Status: dockertypes.Healthy},
+		StartedAt: started.Time,
+		UpdatedAt: time.Now(),
+	})
 
 	inspect, err := a.InspectContainer(ctx, "renamed")
 	if err != nil {
@@ -573,12 +497,13 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 	if inspect.State == nil || !inspect.State.Running {
 		t.Fatalf("renamed running workload was reported stopped: %#v", inspect.State)
 	}
-	if inspect.State.Health == nil {
-		t.Fatalf("renamed healthchecked workload lost health state: %#v", inspect.State)
+	if inspect.State.Health == nil || inspect.State.Health.Status != dockertypes.Healthy {
+		t.Fatalf("renamed healthchecked workload lost monitor state: %#v", inspect.State)
 	}
 }
 
 func int32Ptr(v int32) *int32 { return &v }
+
 
 
 func TestSwarmUpdateReappliesHealthcheckAfterConflict(t *testing.T) {
@@ -636,9 +561,9 @@ func TestSwarmUpdateReappliesHealthcheckAfterConflict(t *testing.T) {
 	if hc == nil || !reflect.DeepEqual(hc.Test, []string{"CMD", "false"}) || hc.Interval != 7*time.Second {
 		t.Fatalf("healthcheck update was lost after conflict: %#v", hc)
 	}
-	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe == nil ||
-		!reflect.DeepEqual(deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command, []string{"false"}) {
-		t.Fatalf("translated probe update was lost after conflict: %#v", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe)
+	if len(deployment.Spec.Template.Spec.ReadinessGates) != 1 ||
+		deployment.Spec.Template.Spec.ReadinessGates[0].ConditionType != corev1.PodConditionType(types.HealthReadinessGate) {
+		t.Fatalf("health readiness gate was lost after conflict: %#v", deployment.Spec.Template.Spec.ReadinessGates)
 	}
 }
 
@@ -678,12 +603,8 @@ func TestInvalidSwarmHealthcheckDoesNotCreateFallbackPVC(t *testing.T) {
 	}
 }
 
+
 func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
-	probe := &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: []string{"true"}},
-		},
-	}
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			UID: "pod-uid",
@@ -692,9 +613,12 @@ func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
 			},
 		},
 		Spec: corev1.PodSpec{
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: corev1.PodConditionType(types.HealthReadinessGate),
+			}},
 			Containers: []corev1.Container{
 				{Name: "sidecar"},
-				{Name: "web", ReadinessProbe: probe},
+				{Name: "web"},
 			},
 		},
 		Status: corev1.PodStatus{
@@ -714,17 +638,13 @@ func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
 		},
 	}
 
-	task := kubePodToSwarmTask(pod, "svc", "node", 1)
+	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{Status: dockertypes.Starting})
 	status := task["Status"].(map[string]any)
 	if status["State"] != "starting" {
-		t.Fatalf("ready sidecar incorrectly made unhealthy target task running: %#v", status)
-	}
-
-	containerStatus := status["ContainerStatus"].(map[string]any)
-	if containerStatus["ContainerID"] != "" {
-		t.Fatalf("unexpected target container id: %#v", containerStatus)
+		t.Fatalf("ready sidecar incorrectly made healthchecked target task running: %#v", status)
 	}
 }
+
 
 func TestKubePodToSwarmTaskWithHealthcheckAndNoContainerStatusIsStarting(t *testing.T) {
 	pod := corev1.Pod{
@@ -735,21 +655,54 @@ func TestKubePodToSwarmTaskWithHealthcheckAndNoContainerStatusIsStarting(t *test
 			},
 		},
 		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name: "web",
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{Command: []string{"true"}},
-					},
-				},
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: corev1.PodConditionType(types.HealthReadinessGate),
 			}},
+			Containers: []corev1.Container{{Name: "web"}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	task := kubePodToSwarmTask(pod, "svc", "node", 1)
+	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{Status: dockertypes.Healthy})
 	status := task["Status"].(map[string]any)
 	if status["State"] != "starting" {
 		t.Fatalf("empty container status must not report healthchecked task running: %#v", status)
+	}
+}
+
+
+func TestKubePodToSwarmTaskReportsUnhealthyMonitorStateFailed(t *testing.T) {
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID: "pod-uid",
+			Labels: map[string]string{
+				types.LabelSwarmService: "web",
+			},
+		},
+		Spec: corev1.PodSpec{
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: corev1.PodConditionType(types.HealthReadinessGate),
+			}},
+			Containers: []corev1.Container{{Name: "web"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:        "web",
+				ContainerID: "containerd://abc",
+				State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{
+		Status:        dockertypes.Unhealthy,
+		FailingStreak: 3,
+	})
+	status := task["Status"].(map[string]any)
+	if status["State"] != "failed" {
+		t.Fatalf("unhealthy Swarm health state = %#v, want failed", status)
+	}
+	if status["Message"] != "container unhealthy" {
+		t.Fatalf("unhealthy Swarm task message = %#v", status["Message"])
 	}
 }
