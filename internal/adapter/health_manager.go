@@ -231,7 +231,7 @@ func (a *KubernetesDockerAdapter) ensureHealthMonitor(parent context.Context, sp
 		Health: dockertypes.Health{
 			Status:        dockertypes.Starting,
 			FailingStreak: 0,
-			Log:           []*dockcontainer.HealthcheckResult{},
+			Log:           []*dockertypes.HealthcheckResult{},
 		},
 		StartedAt: spec.StartedAt,
 		UpdatedAt: time.Now(),
@@ -289,7 +289,7 @@ func (a *KubernetesDockerAdapter) monitorDockerHealth(ctx context.Context, spec 
 	}
 }
 
-func nextDockerHealthInterval(hc *dockcontainer.HealthConfig, status dockcontainer.HealthStatus, startedAt, now time.Time) time.Duration {
+func nextDockerHealthInterval(hc *dockcontainer.HealthConfig, status dockertypes.HealthStatus, startedAt, now time.Time) time.Duration {
 	interval := hc.Interval
 	if interval == 0 {
 		interval = dockerDefaultHealthInterval
@@ -315,7 +315,7 @@ func nextDockerHealthInterval(hc *dockcontainer.HealthConfig, status dockcontain
 	return startInterval
 }
 
-func applyDockerHealthResult(state *dockerHealthState, hc *dockcontainer.HealthConfig, result *dockcontainer.HealthcheckResult) {
+func applyDockerHealthResult(state *dockerHealthState, hc *dockcontainer.HealthConfig, result *dockertypes.HealthcheckResult) {
 	if len(state.Health.Log) >= dockerHealthMaxLogEntries {
 		copy(state.Health.Log, state.Health.Log[len(state.Health.Log)+1-dockerHealthMaxLogEntries:])
 		state.Health.Log = state.Health.Log[:dockerHealthMaxLogEntries-1]
@@ -348,9 +348,9 @@ func applyDockerHealthResult(state *dockerHealthState, hc *dockcontainer.HealthC
 	state.UpdatedAt = result.End
 }
 
-func (a *KubernetesDockerAdapter) runDockerHealthCommand(ctx context.Context, spec dockerHealthMonitorSpec) *dockcontainer.HealthcheckResult {
+func (a *KubernetesDockerAdapter) runDockerHealthCommand(ctx context.Context, spec dockerHealthMonitorSpec) *dockertypes.HealthcheckResult {
 	start := time.Now()
-	result := &dockcontainer.HealthcheckResult{Start: start}
+	result := &dockertypes.HealthcheckResult{Start: start}
 
 	command, disabled, _, err := dockerHealthCommand(spec.Healthcheck.Test)
 	if err != nil || disabled || len(command) == 0 {
@@ -446,7 +446,7 @@ func cloneDockerHealthState(state *dockerHealthState) *dockerHealthState {
 		return nil
 	}
 	copyState := *state
-	copyState.Health.Log = make([]*dockcontainer.HealthcheckResult, 0, len(state.Health.Log))
+	copyState.Health.Log = make([]*dockertypes.HealthcheckResult, 0, len(state.Health.Log))
 	for _, entry := range state.Health.Log {
 		if entry == nil {
 			copyState.Health.Log = append(copyState.Health.Log, nil)
