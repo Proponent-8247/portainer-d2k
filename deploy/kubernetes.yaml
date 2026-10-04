@@ -38,7 +38,11 @@ rules:
   # Pods — for log streaming and exec
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "watch", "list"]
+    verbs: ["get", "watch", "list", "delete"]
+  # pods/status — d2k owns a custom readiness-gate condition for Swarm healthchecks.
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "update", "patch"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
