@@ -16,15 +16,15 @@ Functional fixes are intentionally deferred until the audit is complete.
 
 - [x] Recover exact upstream base and current patch head.
 - [x] Confirm patch is ahead-only of upstream at audit start.
-- [ ] Review Docker container-create health-check translation.
+- [x] Review Docker container-create health-check translation.
 - [x] Review Docker inspect/list health-state reporting.
 - [x] Review Swarm/Compose create/update/readback behavior.
 - [x] Review Docker timing/default semantics.
 - [x] Review Kubernetes probe semantic mismatches.
 - [x] Review API validation/error behavior.
-- [ ] Review image-inherited HEALTHCHECK behavior.
+- [x] Review image-inherited HEALTHCHECK behavior.
 - [x] Review concurrency/restart/readiness edge cases.
-- [ ] Review tests for blind spots and missing failure cases.
+- [x] Review tests for blind spots and missing failure cases.
 - [ ] Run complete build/test/vet/race validation after audit findings are recorded.
 
 ## Findings
@@ -133,5 +133,35 @@ This is especially important for commands that cannot be started at all, such as
 Timeouts and ordinary non-zero exit codes are treated as probe failures by Kubernetes; the mismatch is specifically the exec/infrastructure-error class.
 
 Recommended action after audit: add an explicit live/runtime test for an unstartable health command. If Docker-compatible failure semantics are required, native Kubernetes exec probes alone cannot guarantee them and a wrapper/controller approach is needed.
+
+## Reviewed compatibility limits that are already documented
+
+The following were re-checked and are not being opened as new blockers because the README already scopes/discloses them:
+
+- image-defined/inherited HEALTHCHECK cannot be discovered without image metadata;
+- zero-valued explicit timing fields cannot inherit unknown image-specific health defaults and instead use Docker daemon defaults;
+- `CMD-SHELL` cannot honor image-specific Docker `SHELL` metadata;
+- sub-second Docker durations are rounded to Kubernetes whole seconds;
+- `start_period` and `start_interval` do not have exact Kubernetes equivalents;
+- Swarm uses two independent Kubernetes probes, so the health command is executed twice;
+- liveness restarts the same Kubernetes container/Pod identity instead of creating a new Swarm task identity;
+- Docker health log/output history is not reconstructed;
+- stopped workloads do not retain historical Docker health state;
+- health-status event synthesis and `docker ps --filter health=...` are not implemented;
+- API 1.41 negotiation means normal clients cannot use the newer `health-start-interval` flag.
+
+## Missing regression/live tests identified by this audit
+
+The current automated tests do not cover:
+
+- Kubernetes optimistic-concurrency conflict during a health-check service update (HC-AUD-002);
+- unhealthy/restarting DNSRR or host-port task endpoint filtering (HC-AUD-003);
+- empty ContainerStatuses and injected-ready-sidecar behavior in Swarm task state (HC-AUD-004);
+- health failure with Swarm RestartPolicy `none` / `MaxAttempts` (HC-AUD-005);
+- slow-probe / non-Docker cadence behavior (HC-AUD-006);
+- invalid healthcheck plus volume mount proving no PVC side effects (HC-AUD-007);
+- an exec health command that cannot be started, proving Docker-vs-kubelet error semantics (HC-AUD-008).
+
+These should become regression tests alongside fixes, except where a finding is accepted as a documented architectural limitation.
 
 This file is updated during the audit so progress and findings survive chat interruption.
