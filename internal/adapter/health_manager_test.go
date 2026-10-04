@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -230,6 +231,105 @@ func TestSwarmRestartConditionNoneNeverReservesRestart(t *testing.T) {
 	if allowed {
 		t.Fatal("restart condition none allowed a health restart")
 	}
+}
+
+func TestSwarmHealthFailureDeletesPodWhenRestartAllowed(t *testing.T) {
+	ctx := context.Background()
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "web",
+			Namespace: "healthcheck-test",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "web-pod",
+			Namespace: "healthcheck-test",
+		},
+	}
+	a := newHealthcheckTestAdapter()
+	a.client = fake.NewSimpleClientset(deployment, pod)
+
+	a.handleSwarmHealthFailure(ctx, dockerHealthMonitorSpec{
+		PodName:        "web-pod",
+		DeploymentName: "web",
+		RestartPolicy: swarmHealthRestartPolicy{
+			Condition: "on-failure",
+			Delay:     0,
+		},
+	})
+
+	if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, "web-pod", metav1.GetOptions{}); err == nil {
+		t.Fatal("unhealthy Swarm pod was not deleted for replacement")
+	}
+
+	current, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if current.Annotations[types.AnnotationHealthRestartHistory] == "" {
+		t.Fatal("health-triggered restart was not persisted in restart history")
+	}
+}
+
+func TestSwarmHealthFailureDoesNotDeletePodWhenRestartDisabledOrExhausted(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("restart condition none", func(t *testing.T) {
+		deployment := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "healthcheck-test"},
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-pod", Namespace: "healthcheck-test"},
+		}
+		a := newHealthcheckTestAdapter()
+		a.client = fake.NewSimpleClientset(deployment, pod)
+
+		a.handleSwarmHealthFailure(ctx, dockerHealthMonitorSpec{
+			PodName:        "web-pod",
+			DeploymentName: "web",
+			RestartPolicy:  swarmHealthRestartPolicy{Condition: "none"},
+		})
+
+		if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, "web-pod", metav1.GetOptions{}); err != nil {
+			t.Fatalf("restart condition none deleted pod: %v", err)
+		}
+	})
+
+	t.Run("max attempts exhausted", func(t *testing.T) {
+		history, err := json.Marshal([]int64{time.Now().UnixNano()})
+		if err != nil {
+			t.Fatalf("marshal history: %v", err)
+		}
+		deployment := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "web",
+				Namespace: "healthcheck-test",
+				Annotations: map[string]string{
+					types.AnnotationHealthRestartHistory: string(history),
+				},
+			},
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-pod", Namespace: "healthcheck-test"},
+		}
+		a := newHealthcheckTestAdapter()
+		a.client = fake.NewSimpleClientset(deployment, pod)
+
+		a.handleSwarmHealthFailure(ctx, dockerHealthMonitorSpec{
+			PodName:        "web-pod",
+			DeploymentName: "web",
+			RestartPolicy: swarmHealthRestartPolicy{
+				Condition:   "on-failure",
+				MaxAttempts: 1,
+				Window:      time.Hour,
+			},
+		})
+
+		if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, "web-pod", metav1.GetOptions{}); err != nil {
+			t.Fatalf("exhausted MaxAttempts deleted pod: %v", err)
+		}
+	})
 }
 
 func TestSetPodHealthCondition(t *testing.T) {
