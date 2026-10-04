@@ -29,15 +29,15 @@ Functional fixes are intentionally deferred until the audit is complete.
 
 ## Findings
 
-### HC-AUD-001 — MEDIUM — health status jumps directly to unhealthy after a later readiness loss
+### HC-AUD-001 — LOW / DOCUMENTED LIMITATION — intermediate Docker failing streak is not observable
 
-`dockerHealthStatus` derives the failure streak only from time elapsed since the current container start. Once a container has been running longer than the configured threshold window, any later transition from ready to not-ready is reported immediately as `unhealthy` with `FailingStreak == retries`.
+Kubernetes readiness applies `failureThreshold` internally before `ContainerStatus.Ready` flips false. Re-review therefore confirms that d2k's healthy -> unhealthy *status* transition is broadly aligned with the configured threshold.
 
-Docker resets the failing streak on every successful check and only becomes unhealthy after the configured number of *consecutive* later failures. A container that has been healthy for hours and then fails one check therefore reports incorrectly in d2k.
+The remaining mismatch is Docker's intermediate `FailingStreak`: after a formerly healthy container has one or more failures below the threshold, Docker exposes streak values 1..N-1 while remaining `healthy`. Kubernetes does not expose that probe worker counter through Pod status, so d2k reports streak 0 until readiness flips and then reports the threshold value.
 
-Evidence: `internal/adapter/container.go` computes `unhealthyAfterSeconds` from `runtimeState.StartedAt`, not from the most recent ready->not-ready transition or an observed failure streak.
+This is already disclosed in the README as a threshold-level approximation. It is retained as a compatibility limitation, not treated as a blocker.
 
-Recommended fix after audit: track a readiness-transition timestamp/failure state that can represent failures since the last healthy state, or explicitly expose the status as an approximation without fabricating a full threshold-level streak.
+Recommended action after audit: no mandatory code change unless exact `FailingStreak` compatibility becomes a requirement.
 
 ### HC-AUD-002 — HIGH — Swarm update conflict retry can silently discard the health-check update
 
