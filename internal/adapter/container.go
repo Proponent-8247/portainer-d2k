@@ -193,7 +193,7 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 			Ready:   d.Status.ReadyReplicas > 0,
 		}
 		if deploymentHasTranslatedHealthcheck(d) {
-			runtimeState = runtimeStates[d.Name]
+			runtimeState = runtimeStates[deploymentRuntimeStateKey(d)]
 			if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
 				runtimeState = workloadRuntimeState{Running: true, Ready: true}
 			}
@@ -376,7 +376,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		Ready:   d.Status.ReadyReplicas > 0,
 	}
 	if deploymentHasTranslatedHealthcheck(*d) {
-		runtimeState, err = a.workloadRuntimeState(ctx, resolved)
+		runtimeState, err = a.workloadRuntimeState(ctx, deploymentRuntimeStateKey(*d))
 		if err != nil {
 			return nil, err
 		}
@@ -613,6 +613,19 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 	}
 
 	return fmt.Errorf("unable to scale deployment %q to %d: too many conflicts", name, replicas)
+}
+
+func deploymentRuntimeStateKey(d appsv1.Deployment) string {
+	for _, key := range []string{
+		types.LabelWorkloadName,
+		types.LabelSwarmService,
+		"app",
+	} {
+		if value := d.Spec.Template.Labels[key]; value != "" {
+			return value
+		}
+	}
+	return d.Name
 }
 
 func deploymentHasTranslatedHealthcheck(d appsv1.Deployment) bool {
