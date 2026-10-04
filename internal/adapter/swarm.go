@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 
+	dockcontainer "github.com/docker/docker/api/types/container"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -219,6 +220,7 @@ type swarmServiceSpec struct {
 			Env     []string `json:"Env"`
 			Dir     string   `json:"Dir"`
 			User    string   `json:"User"`
+			Healthcheck *dockcontainer.HealthConfig `json:"Healthcheck"`
 			// Secrets injected as volume mounts at /run/secrets/<target>
 			Secrets []struct {
 				File struct {
@@ -667,8 +669,17 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		args = cs.Args
 	}
 
+	readinessProbe, livenessProbe, healthWarnings, err := buildHealthProbes(cs.Healthcheck, true)
+	if err != nil {
+		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
+	}
+	warnings = append(warnings, healthWarnings...)
+
 	deploymentAnnotations := map[string]string{
 		types.AnnotationImageRef: cs.Image,
+	}
+	if err := annotateHealthcheck(deploymentAnnotations, cs.Healthcheck); err != nil {
+		return nil, err
 	}
 	if isDNSRR {
 		deploymentAnnotations[types.AnnotationEndpointMode] = "dnsrr"
@@ -716,6 +727,8 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 							Resources:       resourceReqs,
 							VolumeMounts:    volumeMounts,
 							Ports:           hostPorts,
+							ReadinessProbe:  readinessProbe,
+							LivenessProbe:   livenessProbe,
 							ImagePullPolicy: corev1.PullAlways,
 						},
 					},
@@ -965,6 +978,21 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 			}
 		}
 		target.Spec.Template.Spec.Containers[0].Env = envVars
+	}
+
+	if cs.Healthcheck != nil {
+		readinessProbe, livenessProbe, _, healthErr := buildHealthProbes(cs.Healthcheck, true)
+		if healthErr != nil {
+			return fmt.Errorf("invalid healthcheck for service %q: %w", id, healthErr)
+		}
+		if target.Annotations == nil {
+			target.Annotations = map[string]string{}
+		}
+		if err := annotateHealthcheck(target.Annotations, cs.Healthcheck); err != nil {
+			return err
+		}
+		target.Spec.Template.Spec.Containers[0].ReadinessProbe = readinessProbe
+		target.Spec.Template.Spec.Containers[0].LivenessProbe = livenessProbe
 	}
 
 	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
@@ -1757,6 +1785,8 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 		}
 	}
 
+	healthcheck, _ := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
+
 	replicas := int64(1)
 	if d.Spec.Replicas != nil {
 		replicas = int64(*d.Spec.Replicas)
@@ -1836,8 +1866,9 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 			"Labels": serviceSpecLabels(d.Labels),
 			"TaskTemplate": map[string]any{
 				"ContainerSpec": map[string]any{
-					"Image": image,
-					"Env":   envSlice,
+					"Image":       image,
+					"Env":         envSlice,
+					"Healthcheck": healthcheck,
 				},
 				// Networks: Portainer reads TaskTemplate.Networks to populate the
 				// "Networks" panel in the service detail view.
