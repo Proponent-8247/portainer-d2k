@@ -52,8 +52,9 @@ type ContainerSummary struct {
 }
 
 type workloadRuntimeState struct {
-	Running bool
-	Ready   bool
+	Running   bool
+	Ready     bool
+	StartedAt time.Time
 }
 
 // CreateContainer implements docker run: creates a Deployment and, where
@@ -117,8 +118,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	// ClusterIP Services with an empty ports list but headless Services are allowed
 	// without ports and still register the DNS name for short-name resolution.
 	clusterSpec := corev1.ServiceSpec{
-		Selector: map[string]string{"app": opts.Name},
-		Ports:    clusterPorts,
+		Selector:                 map[string]string{"app": opts.Name},
+		Ports:                    clusterPorts,
+		PublishNotReadyAddresses: healthcheckEnabled(opts.Healthcheck),
 	}
 	if len(clusterPorts) == 0 {
 		clusterSpec.ClusterIP = "None"
@@ -149,6 +151,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		if svcErr != nil {
 			return "", nil, fmt.Errorf("unable to build service: %w", svcErr)
 		}
+		svc.Spec.PublishNotReadyAddresses = healthcheckEnabled(opts.Healthcheck)
 		if _, svcErr = a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
 			// Roll back the Deployment and ClusterIP service so we don't leave orphans.
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
@@ -166,17 +169,34 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 	if err != nil {
 		return nil, fmt.Errorf("unable to list deployments: %w", err)
 	}
-	runtimeStates, err := a.workloadRuntimeStates(ctx)
-	if err != nil {
-		return nil, err
+
+	runtimeStates := map[string]workloadRuntimeState{}
+	needRuntimeState := false
+	for _, d := range deployments.Items {
+		if deploymentHasTranslatedHealthcheck(d) {
+			needRuntimeState = true
+			break
+		}
+	}
+	if needRuntimeState {
+		runtimeStates, err = a.workloadRuntimeStates(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var summaries []ContainerSummary
 
 	for _, d := range deployments.Items {
-		runtimeState := runtimeStates[d.Name]
-		if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
-			runtimeState = workloadRuntimeState{Running: true, Ready: true}
+		runtimeState := workloadRuntimeState{
+			Running: d.Status.ReadyReplicas > 0,
+			Ready:   d.Status.ReadyReplicas > 0,
+		}
+		if deploymentHasTranslatedHealthcheck(d) {
+			runtimeState = runtimeStates[d.Name]
+			if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
+				runtimeState = workloadRuntimeState{Running: true, Ready: true}
+			}
 		}
 		if !all && !runtimeState.Running {
 			continue
@@ -208,24 +228,35 @@ func (a *KubernetesDockerAdapter) workloadRuntimeStates(ctx context.Context) (ma
 
 	states := map[string]workloadRuntimeState{}
 	for _, pod := range pods.Items {
+		if pod.Labels[types.LabelManagedBy] != types.LabelManagedByValue {
+			continue
+		}
+
 		name := pod.Labels[types.LabelWorkloadName]
+		if name == "" {
+			name = pod.Labels[types.LabelSwarmService]
+		}
 		if name == "" {
 			name = pod.Labels["app"]
 		}
-		if name == "" {
+		if name == "" || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-		state := states[name]
-		if pod.Status.Phase == corev1.PodRunning {
-			state.Running = true
-			for _, containerStatus := range pod.Status.ContainerStatuses {
-				if containerStatus.Ready {
-					state.Ready = true
-					break
-				}
+
+		for _, containerStatus := range pod.Status.ContainerStatuses {
+			if containerStatus.Name != name || containerStatus.State.Running == nil {
+				continue
 			}
+			state := states[name]
+			state.Running = true
+			state.Ready = state.Ready || containerStatus.Ready
+			started := containerStatus.State.Running.StartedAt.Time
+			if state.StartedAt.IsZero() || started.Before(state.StartedAt) {
+				state.StartedAt = started
+			}
+			states[name] = state
+			break
 		}
-		states[name] = state
 	}
 	return states, nil
 }
@@ -340,12 +371,18 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	runtimeState, err := a.workloadRuntimeState(ctx, resolved)
-	if err != nil {
-		return nil, err
+	runtimeState := workloadRuntimeState{
+		Running: d.Status.ReadyReplicas > 0,
+		Ready:   d.Status.ReadyReplicas > 0,
 	}
-	if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
-		runtimeState = workloadRuntimeState{Running: true, Ready: true}
+	if deploymentHasTranslatedHealthcheck(*d) {
+		runtimeState, err = a.workloadRuntimeState(ctx, resolved)
+		if err != nil {
+			return nil, err
+		}
+		if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
+			runtimeState = workloadRuntimeState{Running: true, Ready: true}
+		}
 	}
 
 	result := deploymentToContainerJSON(*d, lbIP, runtimeState)
@@ -578,6 +615,11 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 	return fmt.Errorf("unable to scale deployment %q to %d: too many conflicts", name, replicas)
 }
 
+func deploymentHasTranslatedHealthcheck(d appsv1.Deployment) bool {
+	hc, err := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
+	return err == nil && healthcheckEnabled(hc)
+}
+
 // --- converters ---
 
 func deploymentToSummary(d appsv1.Deployment, runtimeState workloadRuntimeState) ContainerSummary {
@@ -588,10 +630,13 @@ func deploymentToSummary(d appsv1.Deployment, runtimeState workloadRuntimeState)
 			state = "running"
 			uptime := time.Since(d.CreationTimestamp.Time)
 			status = fmt.Sprintf("Up %s", humanizeDuration(uptime))
-			if hc, err := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck]); err == nil && healthcheckEnabled(hc) {
-				if runtimeState.Ready {
+			if healthStatus, _ := dockerHealthStatus(d, runtimeState); healthStatus != "" {
+				switch healthStatus {
+				case dockertypes.Healthy:
 					status += " (healthy)"
-				} else {
+				case dockertypes.Unhealthy:
+					status += " (unhealthy)"
+				default:
 					status += " (health: starting)"
 				}
 			}
@@ -648,12 +693,11 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string, runtimeState wo
 	}
 
 	healthcheck, _ := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
-	if healthcheckEnabled(healthcheck) {
-		healthStatus := dockertypes.Starting
-		if runtimeState.Ready {
-			healthStatus = dockertypes.Healthy
+	if healthStatus, failingStreak := dockerHealthStatus(d, runtimeState); healthStatus != "" {
+		state.Health = &dockertypes.Health{
+			Status:        healthStatus,
+			FailingStreak: failingStreak,
 		}
-		state.Health = &dockertypes.Health{Status: healthStatus}
 	}
 
 	hostConfig := &container.HostConfig{
