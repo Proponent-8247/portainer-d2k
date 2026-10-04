@@ -318,6 +318,22 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 
 	cs := spec.TaskTemplate.ContainerSpec
 
+	// Validate and translate health configuration before any mutating service
+	// preparation (notably fallback PVC creation). Invalid Docker input must
+	// fail atomically without leaving Kubernetes resources behind.
+	readinessProbe, livenessProbe, healthWarnings, err := buildHealthProbes(cs.Healthcheck, true)
+	if err != nil {
+		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
+	}
+	warnings = append(warnings, healthWarnings...)
+
+	deploymentAnnotations := map[string]string{
+		types.AnnotationImageRef: cs.Image,
+	}
+	if err := annotateHealthcheck(deploymentAnnotations, cs.Healthcheck); err != nil {
+		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
+	}
+
 	// --- replicas ---
 	replicas := int32(1)
 	if spec.Mode.Global != nil {
@@ -669,18 +685,6 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		args = cs.Args
 	}
 
-	readinessProbe, livenessProbe, healthWarnings, err := buildHealthProbes(cs.Healthcheck, true)
-	if err != nil {
-		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
-	}
-	warnings = append(warnings, healthWarnings...)
-
-	deploymentAnnotations := map[string]string{
-		types.AnnotationImageRef: cs.Image,
-	}
-	if err := annotateHealthcheck(deploymentAnnotations, cs.Healthcheck); err != nil {
-		return nil, err
-	}
 	if isDNSRR {
 		deploymentAnnotations[types.AnnotationEndpointMode] = "dnsrr"
 	}
