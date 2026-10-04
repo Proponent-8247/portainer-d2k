@@ -620,6 +620,40 @@ func deploymentHasTranslatedHealthcheck(d appsv1.Deployment) bool {
 	return err == nil && healthcheckEnabled(hc)
 }
 
+func dockerHealthStatus(d appsv1.Deployment, runtimeState workloadRuntimeState) (string, int) {
+	hc, err := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
+	if err != nil || !healthcheckEnabled(hc) {
+		return "", 0
+	}
+	if runtimeState.Ready {
+		return dockertypes.Healthy, 0
+	}
+	if !runtimeState.Running || runtimeState.StartedAt.IsZero() ||
+		len(d.Spec.Template.Spec.Containers) == 0 {
+		return dockertypes.Starting, 0
+	}
+
+	probe := d.Spec.Template.Spec.Containers[0].ReadinessProbe
+	if probe == nil {
+		return dockertypes.Starting, 0
+	}
+
+	period := int64(probe.PeriodSeconds)
+	if period < 1 {
+		period = 1
+	}
+	threshold := int64(probe.FailureThreshold)
+	if threshold < 1 {
+		threshold = 1
+	}
+	unhealthyAfterSeconds := int64(probe.InitialDelaySeconds) + (threshold-1)*period
+	elapsedSeconds := int64(time.Since(runtimeState.StartedAt) / time.Second)
+	if elapsedSeconds >= unhealthyAfterSeconds {
+		return dockertypes.Unhealthy, int(threshold)
+	}
+	return dockertypes.Starting, 0
+}
+
 // --- converters ---
 
 func deploymentToSummary(d appsv1.Deployment, runtimeState workloadRuntimeState) ContainerSummary {
