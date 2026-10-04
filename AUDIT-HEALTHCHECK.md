@@ -117,4 +117,21 @@ Standalone container creation validates the healthcheck during deployment constr
 
 Recommended fix after audit: validate the Docker HealthConfig at the start of `SwarmCreateService`, before any mutating mount/PVC/resource preparation.
 
+### HC-AUD-008 — HIGH — Kubernetes exec-probe infrastructure errors do not match Docker health failure semantics
+
+Docker converts an error running the health-check command into a health result with exit code `-1`; that result increments the failing streak and can transition the container to unhealthy.
+
+Kubernetes' exec prober distinguishes a normal non-zero process exit (probe failure) from an execution/infrastructure error. Non-`ExitError` failures are returned as `Unknown` with an error, and the kubelet probe worker discards that result without advancing the success/failure run.
+
+This is especially important for commands that cannot be started at all, such as a missing direct `CMD` executable or a missing `/bin/sh` for a translated `CMD-SHELL` probe. In Swarm mode:
+
+- readiness can remain false;
+- liveness can retain its initial success state;
+- the failure threshold may never be reached;
+- the task can remain `starting` rather than becoming unhealthy/failed and being restarted/replaced as Docker would.
+
+Timeouts and ordinary non-zero exit codes are treated as probe failures by Kubernetes; the mismatch is specifically the exec/infrastructure-error class.
+
+Recommended action after audit: add an explicit live/runtime test for an unstartable health command. If Docker-compatible failure semantics are required, native Kubernetes exec probes alone cannot guarantee them and a wrapper/controller approach is needed.
+
 This file is updated during the audit so progress and findings survive chat interruption.
