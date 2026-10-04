@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -13,7 +14,9 @@ import (
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -576,3 +579,177 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 }
 
 func int32Ptr(v int32) *int32 { return &v }
+
+
+func TestSwarmUpdateReappliesHealthcheckAfterConflict(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+
+	createBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{
+			"Image":"busybox:latest",
+			"Healthcheck":{"Test":["CMD","true"]}
+		}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	if _, err := a.SwarmCreateService(ctx, createBody); err != nil {
+		t.Fatalf("SwarmCreateService: %v", err)
+	}
+
+	conflicts := 0
+	a.client.(*fake.Clientset).Fake.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts == 0 {
+			conflicts++
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Group: "apps", Resource: "deployments"},
+				"web",
+				fmt.Errorf("simulated conflict"),
+			)
+		}
+		return false, nil, nil
+	})
+
+	updateBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{
+			"Image":"busybox:latest",
+			"Healthcheck":{"Test":["CMD","false"],"Interval":7000000000}
+		}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	if _, err := a.SwarmUpdateService(ctx, "web", updateBody); err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	if conflicts != 1 {
+		t.Fatalf("expected exactly one simulated conflict, got %d", conflicts)
+	}
+
+	deployment, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated deployment: %v", err)
+	}
+	hc, err := decodeHealthcheckAnnotation(deployment.Annotations[types.AnnotationHealthcheck])
+	if err != nil {
+		t.Fatalf("decode healthcheck: %v", err)
+	}
+	if hc == nil || !reflect.DeepEqual(hc.Test, []string{"CMD", "false"}) || hc.Interval != 7*time.Second {
+		t.Fatalf("healthcheck update was lost after conflict: %#v", hc)
+	}
+	if deployment.Spec.Template.Spec.Containers[0].ReadinessProbe == nil ||
+		!reflect.DeepEqual(deployment.Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command, []string{"false"}) {
+		t.Fatalf("translated probe update was lost after conflict: %#v", deployment.Spec.Template.Spec.Containers[0].ReadinessProbe)
+	}
+}
+
+func TestInvalidSwarmHealthcheckDoesNotCreateFallbackPVC(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+
+	body := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{
+			"Image":"busybox:latest",
+			"Healthcheck":{"Test":["CMD","true"],"Interval":1},
+			"Mounts":[{"Type":"volume","Source":"data","Target":"/data"}]
+		}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+
+	if _, err := a.SwarmCreateService(ctx, body); err == nil {
+		t.Fatal("expected invalid healthcheck to reject service creation")
+	} else if !errors.Is(err, ErrInvalidHealthcheck) {
+		t.Fatalf("error %v is not classified as invalid healthcheck", err)
+	}
+
+	pvcs, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list PVCs: %v", err)
+	}
+	if len(pvcs.Items) != 0 {
+		t.Fatalf("invalid healthcheck left PVC side effects: %#v", pvcs.Items)
+	}
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("invalid healthcheck left deployment side effects: %#v", deployments.Items)
+	}
+}
+
+func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{"true"}},
+		},
+	}
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID: "pod-uid",
+			Labels: map[string]string{
+				types.LabelSwarmService: "web",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "sidecar"},
+				{Name: "web", ReadinessProbe: probe},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:  "sidecar",
+					Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				},
+				{
+					Name:  "web",
+					Ready: false,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				},
+			},
+		},
+	}
+
+	task := kubePodToSwarmTask(pod, "svc", "node", 1)
+	status := task["Status"].(map[string]any)
+	if status["State"] != "starting" {
+		t.Fatalf("ready sidecar incorrectly made unhealthy target task running: %#v", status)
+	}
+
+	containerStatus := status["ContainerStatus"].(map[string]any)
+	if containerStatus["ContainerID"] != "" {
+		t.Fatalf("unexpected target container id: %#v", containerStatus)
+	}
+}
+
+func TestKubePodToSwarmTaskWithHealthcheckAndNoContainerStatusIsStarting(t *testing.T) {
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID: "pod-uid",
+			Labels: map[string]string{
+				types.LabelSwarmService: "web",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "web",
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{Command: []string{"true"}},
+					},
+				},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	task := kubePodToSwarmTask(pod, "svc", "node", 1)
+	status := task["Status"].(map[string]any)
+	if status["State"] != "starting" {
+		t.Fatalf("empty container status must not report healthchecked task running: %#v", status)
+	}
+}
