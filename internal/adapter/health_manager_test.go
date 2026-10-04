@@ -25,7 +25,7 @@ func TestDockerHealthStateTracksExactFailingStreak(t *testing.T) {
 	state := &dockerHealthState{
 		Health: dockertypes.Health{
 			Status: dockertypes.Starting,
-			Log:    []*dockcontainer.HealthcheckResult{},
+			Log:    []*dockertypes.HealthcheckResult{},
 		},
 		StartedAt: started,
 	}
@@ -34,25 +34,25 @@ func TestDockerHealthStateTracksExactFailingStreak(t *testing.T) {
 		Retries: 3,
 	}
 
-	first := &dockcontainer.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
+	first := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
 	applyDockerHealthResult(state, hc, first)
 	if state.Health.Status != dockertypes.Starting || state.Health.FailingStreak != 1 {
 		t.Fatalf("first failure = %s/%d, want starting/1", state.Health.Status, state.Health.FailingStreak)
 	}
 
-	second := &dockcontainer.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
+	second := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
 	applyDockerHealthResult(state, hc, second)
 	if state.Health.Status != dockertypes.Starting || state.Health.FailingStreak != 2 {
 		t.Fatalf("second failure = %s/%d, want starting/2", state.Health.Status, state.Health.FailingStreak)
 	}
 
-	third := &dockcontainer.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
+	third := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
 	applyDockerHealthResult(state, hc, third)
 	if state.Health.Status != dockertypes.Unhealthy || state.Health.FailingStreak != 3 {
 		t.Fatalf("third failure = %s/%d, want unhealthy/3", state.Health.Status, state.Health.FailingStreak)
 	}
 
-	success := &dockcontainer.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 0}
+	success := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 0}
 	applyDockerHealthResult(state, hc, success)
 	if state.Health.Status != dockertypes.Healthy || state.Health.FailingStreak != 0 {
 		t.Fatalf("success = %s/%d, want healthy/0", state.Health.Status, state.Health.FailingStreak)
@@ -80,7 +80,7 @@ func TestDockerHealthStartPeriodAndStartInterval(t *testing.T) {
 		t.Fatalf("capped start interval = %s, want 1s", got)
 	}
 
-	graceFailure := &dockcontainer.HealthcheckResult{
+	graceFailure := &dockertypes.HealthcheckResult{
 		Start:    started.Add(5 * time.Second),
 		End:      started.Add(5*time.Second + time.Millisecond),
 		ExitCode: 1,
@@ -90,7 +90,7 @@ func TestDockerHealthStartPeriodAndStartInterval(t *testing.T) {
 		t.Fatalf("start-period failure = %s/%d, want starting/0", state.Health.Status, state.Health.FailingStreak)
 	}
 
-	success := &dockcontainer.HealthcheckResult{
+	success := &dockertypes.HealthcheckResult{
 		Start:    started.Add(6 * time.Second),
 		End:      started.Add(6*time.Second + time.Millisecond),
 		ExitCode: 0,
