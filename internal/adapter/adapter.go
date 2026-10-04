@@ -57,6 +57,14 @@ type KubernetesDockerAdapter struct {
 	// startup, keyed by NFS server address. Used by SwarmCreateService to create
 	// NFS-backed PVCs inline when docker stack deploy doesn't call volume create.
 	nfsStorageClasses map[string]string // server -> storageClassName
+
+	// Docker-compatible health state is owned by d2k instead of inferred from
+	// Kubernetes readiness. Monitors are keyed by pod UID + container ID while
+	// healthStates are keyed by pod UID so API readback follows task identity.
+	healthMu       sync.RWMutex
+	healthStates   map[string]*dockerHealthState
+	healthMonitors map[string]context.CancelFunc
+	healthCancel   context.CancelFunc
 }
 
 // Options configures a new KubernetesDockerAdapter.
@@ -107,6 +115,8 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
+		healthStates:      map[string]*dockerHealthState{},
+		healthMonitors:    map[string]context.CancelFunc{},
 	}, nil
 }
 
