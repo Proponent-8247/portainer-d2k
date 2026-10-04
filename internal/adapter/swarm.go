@@ -2051,6 +2051,9 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context,
 			if p.Status.Phase != corev1.PodRunning {
 				continue
 			}
+			if deploymentHasTranslatedHealthcheck(d) && !swarmTargetContainerReady(p) {
+				continue
+			}
 			nodeIP := p.Status.HostIP
 			if nodeIP == "" || seen[nodeIP] {
 				continue
@@ -2140,30 +2143,66 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, 
 }
 
 
+func swarmTargetContainerName(p corev1.Pod) string {
+	for _, key := range []string{
+		types.LabelSwarmService,
+		types.LabelWorkloadName,
+		"app",
+	} {
+		if value := p.Labels[key]; value != "" {
+			return value
+		}
+	}
+	if len(p.Spec.Containers) > 0 {
+		return p.Spec.Containers[0].Name
+	}
+	return ""
+}
+
+func swarmTargetContainerStatus(p corev1.Pod) (*corev1.ContainerStatus, bool) {
+	name := swarmTargetContainerName(p)
+	if name == "" {
+		return nil, false
+	}
+	for i := range p.Status.ContainerStatuses {
+		if p.Status.ContainerStatuses[i].Name == name {
+			return &p.Status.ContainerStatuses[i], true
+		}
+	}
+	return nil, false
+}
+
+func swarmTargetHasHealthcheck(p corev1.Pod) bool {
+	name := swarmTargetContainerName(p)
+	for i := range p.Spec.Containers {
+		if p.Spec.Containers[i].Name == name {
+			return p.Spec.Containers[i].ReadinessProbe != nil
+		}
+	}
+	return false
+}
+
+func swarmTargetContainerReady(p corev1.Pod) bool {
+	status, ok := swarmTargetContainerStatus(p)
+	return ok && status.State.Running != nil && status.Ready
+}
+
 func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int) map[string]any {
-	// Map pod phase + container readiness to a Swarm task state.
-	// Only report "running" when the pod is Running AND at least one
-	// container is ready - otherwise the CLI progress loop won't advance.
+	// Swarm health semantics belong to the service container, not arbitrary
+	// injected sidecars. A task with a translated health check stays "starting"
+	// until that target container is ready. Missing ContainerStatuses is also
+	// "starting"; reporting it as running can make Docker CLI convergence finish
+	// before the first health result exists.
 	state := "preparing"
+	targetStatus, hasTargetStatus := swarmTargetContainerStatus(p)
 	switch p.Status.Phase {
 	case corev1.PodRunning:
-		// If ContainerStatuses is empty the pod just started and status
-		// hasn't populated yet - treat as running so the CLI doesn't stall.
-		if len(p.Status.ContainerStatuses) == 0 {
-			state = "running"
+		if !hasTargetStatus || targetStatus.State.Running == nil {
+			state = "starting"
+		} else if swarmTargetHasHealthcheck(p) && !targetStatus.Ready {
+			state = "starting"
 		} else {
-			ready := false
-			for _, cs := range p.Status.ContainerStatuses {
-				if cs.Ready {
-					ready = true
-					break
-				}
-			}
-			if ready {
-				state = "running"
-			} else {
-				state = "starting"
-			}
+			state = "running"
 		}
 	case corev1.PodFailed:
 		state = "failed"
@@ -2171,22 +2210,22 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 		state = "complete"
 	}
 
-	// ContainerStatus for docker service ps error column.
+	// ContainerStatus for docker service ps error column must describe the
+	// service container, not a mutating-webhook sidecar that happens to be first.
 	containerStatus := map[string]any{
 		"ContainerID": "",
 		"PID":         0,
 		"ExitCode":    0,
 	}
 	statusErr := p.Status.Message
-	if len(p.Status.ContainerStatuses) > 0 {
-		cs := p.Status.ContainerStatuses[0]
-		containerStatus["ContainerID"] = cs.ContainerID
-		if cs.State.Terminated != nil {
-			containerStatus["ExitCode"] = cs.State.Terminated.ExitCode
-			statusErr = cs.State.Terminated.Message
+	if hasTargetStatus {
+		containerStatus["ContainerID"] = targetStatus.ContainerID
+		if targetStatus.State.Terminated != nil {
+			containerStatus["ExitCode"] = targetStatus.State.Terminated.ExitCode
+			statusErr = targetStatus.State.Terminated.Message
 		}
-		if cs.State.Waiting != nil && cs.State.Waiting.Message != "" {
-			statusErr = cs.State.Waiting.Message
+		if targetStatus.State.Waiting != nil && targetStatus.State.Waiting.Message != "" {
+			statusErr = targetStatus.State.Waiting.Message
 		}
 	}
 
@@ -2208,80 +2247,10 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 		"Status": map[string]any{
 			"State":           state,
 			"Message":         statusErr,
-			"Err":             statusErr,
 			"Timestamp":       p.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 			"ContainerStatus": containerStatus,
-			"PortStatus": func() map[string]any {
-				var taskPorts []any
-				for _, c := range p.Spec.Containers {
-					for _, cp := range c.Ports {
-						if cp.HostPort == 0 {
-							continue
-						}
-						proto := "tcp"
-						if cp.Protocol == corev1.ProtocolUDP {
-							proto = "udp"
-						}
-						taskPorts = append(taskPorts, map[string]any{
-							"Protocol":      proto,
-							"TargetPort":    int(cp.ContainerPort),
-							"PublishedPort": int(cp.HostPort),
-							"PublishMode":   "host",
-						})
-					}
-				}
-				if taskPorts == nil {
-					taskPorts = []any{}
-				}
-				return map[string]any{"Ports": taskPorts}
-			}(),
 		},
-		"DesiredState":        "running",
-		"NetworksAttachments": []any{},
-	}
-}
-
-func podImage(p corev1.Pod) string {
-	if len(p.Spec.Containers) > 0 {
-		return p.Spec.Containers[0].Image
-	}
-	return ""
-}
-
-func kubeSecretToSwarm(s corev1.Secret) map[string]any {
-	// Return the original Swarm name (which may contain underscores) so the
-	// Docker CLI can match it against the name in the compose file.
-	// We stored it in an annotation at create time; fall back to k8s name.
-	name := s.Name
-	if swarmName, ok := s.Annotations["d2k.portainer.io/swarm-name"]; ok && swarmName != "" {
-		name = swarmName
-	}
-	return map[string]any{
-		"ID": swarmID(string(s.UID)),
-		"Version": map[string]any{"Index": uint64(1)},
-		"CreatedAt": s.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-		"UpdatedAt": s.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-		"Spec": map[string]any{
-			"Name":   name,
-			"Labels": s.Labels,
-		},
-	}
-}
-
-func kubeConfigMapToSwarm(c corev1.ConfigMap) map[string]any {
-	name := c.Name
-	if swarmName, ok := c.Annotations["d2k.portainer.io/swarm-name"]; ok && swarmName != "" {
-		name = swarmName
-	}
-	return map[string]any{
-		"ID": swarmID(string(c.UID)),
-		"Version": map[string]any{"Index": uint64(1)},
-		"CreatedAt": c.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-		"UpdatedAt": c.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-		"Spec": map[string]any{
-			"Name":   name,
-			"Labels": c.Labels,
-		},
+		"DesiredState": "running",
 	}
 }
 
