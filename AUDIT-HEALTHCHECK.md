@@ -57,4 +57,34 @@ VIP-mode Kubernetes Services are readiness-gated, so the discrepancy is specific
 
 Recommended fix after audit: when health checks are translated, filter DNSRR endpoint reporting on the target container's running + ready status (while preserving current behavior for services without translated health checks).
 
+### HC-AUD-004 — HIGH — Swarm task can be reported running before the health-checked container is ready
+
+`kubePodToSwarmTask` marks a Running Pod as Swarm task `running` when either:
+
+1. `ContainerStatuses` is temporarily empty, or
+2. *any* container in the Pod is ready.
+
+That conflicts with Swarm health semantics. Moby's service health tests require a task with an initial failing health check to remain in `STARTING` until the health check succeeds. A transient empty status can therefore let Docker CLI progress converge before the first health result. More importantly, a mutating webhook / service-mesh sidecar that becomes ready can make the task appear running indefinitely even while the d2k service container's health probe is failing.
+
+The standalone runtime-state code already avoids this class by selecting the named d2k container, but the Swarm task converter does not.
+
+Recommended fix after audit: determine the d2k target container by service/container name and require *that container* to be running + ready. If health probes are configured and its status has not appeared yet, report `starting`, not `running`.
+
+### HC-AUD-005 — MEDIUM / ARCHITECTURAL — liveness-based Swarm health restarts ignore Swarm RestartPolicy
+
+Translated Swarm health checks add a Kubernetes liveness probe. A liveness failure restarts the container according to the Pod restart policy, which d2k hard-codes to `Always`.
+
+Real Swarm marks an unhealthy task failed and then applies the service RestartPolicy. SwarmKit explicitly supports `RestartOnNone`, `RestartOnFailure`, delays, windows, and `MaxAttempts`; `RestartOnNone` means the task is never restarted.
+
+Consequences include:
+
+- a service configured with restart condition `none` is still restarted by d2k after health failure;
+- `MaxAttempts` cannot stop repeated unhealthy restarts;
+- restart delay/window semantics are bypassed;
+- the same Pod/task identity is reused rather than creating a replacement task.
+
+Part of this is a pre-existing d2k Swarm restart-policy limitation, but the health-check patch actively depends on liveness to approximate Swarm health failure, so the mismatch is directly exposed by this feature.
+
+Recommended action after audit: either implement health-failure handling through a Swarm-aware controller/lifecycle path, or clearly scope the upstream PR as an approximation and document that RestartPolicy is not honored for health-triggered failures.
+
 This file is updated during the audit so progress and findings survive chat interruption.
