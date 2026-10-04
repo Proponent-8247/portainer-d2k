@@ -331,6 +331,48 @@ func TestSwarmReadbackOmitsAbsentHealthcheck(t *testing.T) {
 	}
 }
 
+func TestDockerHealthStatusUsesKubernetesProbeTickSchedule(t *testing.T) {
+	hc := &dockcontainer.HealthConfig{
+		Test:        []string{"CMD", "false"},
+		Interval:    30 * time.Second,
+		StartPeriod: 5 * time.Second,
+		Retries:     3,
+	}
+	annotations := map[string]string{}
+	if err := annotateHealthcheck(annotations, hc); err != nil {
+		t.Fatalf("annotateHealthcheck: %v", err)
+	}
+	readiness, _, _, err := buildHealthProbes(hc, false)
+	if err != nil {
+		t.Fatalf("buildHealthProbes: %v", err)
+	}
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "web", ReadinessProbe: readiness}},
+				},
+			},
+		},
+	}
+
+	status, _ := dockerHealthStatus(deployment, workloadRuntimeState{
+		Running:   true,
+		StartedAt: time.Now().Add(-65 * time.Second),
+	})
+	if status != dockertypes.Starting {
+		t.Fatalf("health status at 65s = %q, want starting until third 30s probe tick", status)
+	}
+	status, streak := dockerHealthStatus(deployment, workloadRuntimeState{
+		Running:   true,
+		StartedAt: time.Now().Add(-91 * time.Second),
+	})
+	if status != dockertypes.Unhealthy || streak != 3 {
+		t.Fatalf("health status at 91s = %q/%d, want unhealthy/3", status, streak)
+	}
+}
+
 func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
