@@ -159,7 +159,7 @@ func dockerHealthCommand(test []string) (command []string, disabled bool, warnin
 
 func probeSeconds(field string, value, defaultValue time.Duration, allowZero bool) (int32, error) {
 	if value < 0 {
-		return 0, fmt.Errorf("%s cannot be negative", field)
+		return 0, invalidHealthcheckf("%s cannot be negative", field)
 	}
 	if value == 0 {
 		value = defaultValue
@@ -168,7 +168,7 @@ func probeSeconds(field string, value, defaultValue time.Duration, allowZero boo
 		return 0, nil
 	}
 	if value <= 0 {
-		return 0, fmt.Errorf("%s must be positive", field)
+		return 0, invalidHealthcheckf("%s must be positive", field)
 	}
 
 	seconds := int64(value / time.Second)
@@ -179,7 +179,7 @@ func probeSeconds(field string, value, defaultValue time.Duration, allowZero boo
 		seconds = 1
 	}
 	if seconds > math.MaxInt32 {
-		return 0, fmt.Errorf("%s exceeds Kubernetes maximum probe duration", field)
+		return 0, invalidHealthcheckf("%s exceeds Kubernetes maximum probe duration", field)
 	}
 	return int32(seconds), nil
 }
