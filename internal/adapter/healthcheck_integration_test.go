@@ -16,8 +16,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -33,7 +33,6 @@ func newHealthcheckTestAdapter() *KubernetesDockerAdapter {
 		networks:  map[string]*NetworkSummary{},
 	}
 }
-
 
 func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 	ctx := context.Background()
@@ -82,7 +81,6 @@ func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 		t.Fatalf("inspect health state = %#v, want healthy", inspect.State)
 	}
 }
-
 
 func TestSwarmHealthcheckWiresIntoCreateAndReadback(t *testing.T) {
 	ctx := context.Background()
@@ -252,8 +250,6 @@ func TestWorkloadRuntimeStateIgnoresForeignPodsAndSidecars(t *testing.T) {
 	}
 }
 
-
-
 func TestSwarmReadbackOmitsAbsentHealthcheck(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
@@ -277,9 +273,6 @@ func TestSwarmReadbackOmitsAbsentHealthcheck(t *testing.T) {
 		t.Fatalf("absent healthcheck should be omitted from service readback: %#v", containerSpec)
 	}
 }
-
-
-
 
 func TestSwarmUpdateCanRemoveHealthcheck(t *testing.T) {
 	ctx := context.Background()
@@ -326,7 +319,6 @@ func TestSwarmUpdateCanRemoveHealthcheck(t *testing.T) {
 	}
 }
 
-
 func TestSwarmUpdateUsesNativeDockerStartTimingWithoutApproximationWarnings(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
@@ -369,7 +361,6 @@ func TestSwarmUpdateUsesNativeDockerStartTimingWithoutApproximationWarnings(t *t
 		t.Fatalf("healthcheck update did not add readiness gate: %#v", deployment.Spec.Template.Spec.ReadinessGates)
 	}
 }
-
 
 func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 	ctx := context.Background()
@@ -418,7 +409,6 @@ func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 		t.Fatalf("disabled healthcheck was not preserved for readback: %#v", hc)
 	}
 }
-
 
 func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *testing.T) {
 	ctx := context.Background()
@@ -503,8 +493,6 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 }
 
 func int32Ptr(v int32) *int32 { return &v }
-
-
 
 func TestSwarmUpdateReappliesHealthcheckAfterConflict(t *testing.T) {
 	ctx := context.Background()
@@ -603,7 +591,6 @@ func TestInvalidSwarmHealthcheckDoesNotCreateFallbackPVC(t *testing.T) {
 	}
 }
 
-
 func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -645,7 +632,6 @@ func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
 	}
 }
 
-
 func TestKubePodToSwarmTaskWithHealthcheckAndNoContainerStatusIsStarting(t *testing.T) {
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -669,7 +655,6 @@ func TestKubePodToSwarmTaskWithHealthcheckAndNoContainerStatusIsStarting(t *test
 		t.Fatalf("empty container status must not report healthchecked task running: %#v", status)
 	}
 }
-
 
 func TestKubePodToSwarmTaskReportsUnhealthyMonitorStateFailed(t *testing.T) {
 	pod := corev1.Pod{
