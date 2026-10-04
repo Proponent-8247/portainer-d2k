@@ -27,6 +27,24 @@ Functional fixes are intentionally deferred until the audit is complete.
 - [x] Review tests for blind spots and missing failure cases.
 - [x] Run complete build/test/vet/race validation after audit findings are recorded.
 
+## Remediation ledger
+
+GitHub Issues are disabled for this repository, so this committed file is the authoritative remediation ledger.
+
+| Finding | Status | Remediation |
+|---|---|---|
+| HC-AUD-001 | IN PROGRESS | Replace inferred probe streak with d2k-owned Docker health state. |
+| HC-AUD-002 | IN PROGRESS | Reapply full service mutation after every Kubernetes conflict refetch. |
+| HC-AUD-003 | IN PROGRESS | Gate DNSRR/host-port endpoint advertisement on d2k health readiness. |
+| HC-AUD-004 | IN PROGRESS | Resolve Swarm task state from the target container/health state only. |
+| HC-AUD-005 | IN PROGRESS | Move health-triggered restarts out of Kubernetes liveness and honor Swarm restart condition/delay/attempt/window policy. |
+| HC-AUD-006 | IN PROGRESS | Replace kubelet probe cadence with Docker-compatible d2k monitor cadence. |
+| HC-AUD-007 | IN PROGRESS | Validate health configuration before any Swarm create mutations. |
+| HC-AUD-008 | IN PROGRESS | Count exec/infrastructure errors as Docker health failures in d2k monitor. |
+| HC-AUD-009 | IN PROGRESS | Enforce Kubernetes annotation-size representability before mutation. |
+| HC-AUD-010 | IN PROGRESS | Resolve runtime state using the Deployment's workload identity after rename. |
+| HC-AUD-011 | IN PROGRESS | Execute direct Docker health argv through d2k pod-exec without kubelet probe expansion. |
+
 ## Findings
 
 ### HC-AUD-001 — LOW / DOCUMENTED LIMITATION — intermediate Docker failing streak is not observable
