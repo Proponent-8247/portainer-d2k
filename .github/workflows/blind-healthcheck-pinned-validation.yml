@@ -25,45 +25,65 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify exact SHA
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "6e7d77eaca67e5684b35012714553fde81bdae39"
-
-      - name: gofmt
-        shell: bash
-        run: |
-          test -z "$(gofmt -l .)"
-
-      - name: Verify go mod tidy
-        shell: bash
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test
-        run: go test ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Race
-        run: go test -race ./...
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build multi-arch OCI
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          platforms: linux/amd64,linux/arm64
-          outputs: type=oci,dest=/tmp/d2k-image.tar
-          tags: d2k:blind-healthcheck-validation
+      - name: Validate exact pinned candidate
+        shell: bash
+        run: |
+          set +e
+          failures=0
+
+          report() {
+            local name="$1"
+            local rc="$2"
+            if [ "$rc" -eq 0 ]; then
+              echo "::notice::$name: PASS"
+            else
+              echo "::error::$name: FAIL (exit $rc)"
+              failures=1
+            fi
+          }
+
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "6e7d77eaca67e5684b35012714553fde81bdae39"
+          report "exact SHA" "$?"
+
+          fmt_files="$(gofmt -l .)"
+          fmt_rc=0
+          if [ -n "$fmt_files" ]; then
+            printf 'gofmt would change:\n%s\n' "$fmt_files"
+            fmt_rc=1
+          fi
+          report "gofmt" "$fmt_rc"
+
+          go mod tidy
+          tidy_cmd_rc=$?
+          git diff --exit-code -- go.mod go.sum
+          tidy_diff_rc=$?
+          if [ "$tidy_cmd_rc" -eq 0 ] && [ "$tidy_diff_rc" -eq 0 ]; then tidy_rc=0; else tidy_rc=1; fi
+          report "go mod tidy diff" "$tidy_rc"
+
+          go build ./...
+          report "go build ./..." "$?"
+
+          go test ./...
+          report "go test ./..." "$?"
+
+          go vet ./...
+          report "go vet ./..." "$?"
+
+          go test -race ./...
+          report "go test -race ./..." "$?"
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --output type=oci,dest=/tmp/d2k-image.tar \
+            --tag d2k:blind-healthcheck-validation \
+            .
+          report "multi-arch OCI build" "$?"
+
+          exit "$failures"
