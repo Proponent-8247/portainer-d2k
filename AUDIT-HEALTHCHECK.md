@@ -25,7 +25,7 @@ Functional fixes are intentionally deferred until the audit is complete.
 - [x] Review image-inherited HEALTHCHECK behavior.
 - [x] Review concurrency/restart/readiness edge cases.
 - [x] Review tests for blind spots and missing failure cases.
-- [ ] Run complete build/test/vet/race validation after audit findings are recorded.
+- [x] Run complete build/test/vet/race validation after audit findings are recorded.
 
 ## Findings
 
@@ -185,5 +185,70 @@ When the renamed workload is Ready, the current ReadyReplicas fallback masks the
 The underlying rename implementation has broader pre-existing naming/service limitations, but the health-state lookup adds a new visible failure mode.
 
 Recommended action after audit: either update the workload labels/container identity during rename, or derive health runtime lookup from the Deployment's actual Pod selector/workload label rather than assuming Deployment.Name.
+
+### HC-AUD-011 — LOW — Kubernetes exec probes expand `$(VAR)` in direct Docker CMD arguments
+
+Docker's direct health-check form (`Test: ["CMD", ...]`) executes the argv supplied after `CMD` without shell/environment substitution by the Docker health monitor.
+
+Kubelet exec probes call `ExpandContainerCommandOnlyStatic` before invoking the runtime. That expands Kubernetes-style `$(VAR)` tokens from statically defined container environment values.
+
+A direct Docker health command that intentionally passes a literal argument such as `$(FOO)` can therefore receive the value of `FOO` under d2k instead. This is distinct from normal shell-form `$FOO` expansion.
+
+Recommended fix after audit: for direct `CMD` probes, escape Kubernetes command expansion so Docker argv remains literal, and add a regression test covering literal `$(VAR)` input.
+
+## Validation
+
+Exact functional/audit head validated: `e0091b2b0194fd2cf06b4a1a7aae42f54685fa09`
+
+Temporary validation PR: `#5` (closed after validation)
+
+Workflow run: `37188795262`
+
+All gates passed:
+
+- strict `go mod tidy` diff check;
+- health-check file formatting check;
+- `go build ./...`;
+- `go test ./...`;
+- `go vet ./...`;
+- `go test -race ./...`;
+- Portainer's normal pull-request multi-architecture OCI build for linux/amd64 and linux/arm64.
+
+The successful validation establishes that the current patch builds cleanly and its existing automated tests pass. It does not invalidate the behavioral/concurrency findings above; several findings specifically describe cases the current test suite does not exercise.
+
+## Audit disposition
+
+### Must address before blind review / upstream submission
+
+- **HC-AUD-002 (HIGH):** reapply requested Swarm mutations after every optimistic-concurrency refetch.
+- **HC-AUD-003 (MEDIUM):** make DNSRR/host-port endpoint reporting health-aware.
+- **HC-AUD-004 (HIGH):** base Swarm task readiness on the target d2k container, not empty/any-container status.
+- **HC-AUD-007 (MEDIUM):** validate health configuration before Swarm create performs PVC/resource mutations.
+- **HC-AUD-009 (LOW):** reject unrepresentable annotation-sized health configs before Kubernetes mutation.
+- **HC-AUD-011 (LOW):** preserve literal Docker direct-CMD argv across kubelet command expansion.
+
+### Requires an explicit compatibility/design decision before upstream submission
+
+- **HC-AUD-005 (MEDIUM / architectural):** liveness restarts do not honor Swarm RestartPolicy / task replacement semantics.
+- **HC-AUD-006 (MEDIUM / architectural):** Kubernetes probe cadence is not Docker's end-of-check interval state machine.
+- **HC-AUD-008 (HIGH / architectural):** kubelet discards some exec/infrastructure probe errors that Docker counts as health failures.
+
+At minimum, these need precise upstream-facing documentation plus targeted live tests if the approximation is accepted. If Docker/Swarm behavioral fidelity is a requirement, native Kubernetes probes alone are insufficient for these cases.
+
+### Non-blocking / accepted documented limitation
+
+- **HC-AUD-001 (LOW):** intermediate Docker failing-streak values are not observable from Pod readiness state.
+
+### Broader interaction to fix or consciously defer
+
+- **HC-AUD-010 (LOW):** health runtime-state lookup after `docker rename` inherits the existing rename identity mismatch. This should be fixed with the health work if rename compatibility is expected, or explicitly deferred as a pre-existing rename limitation.
+
+## Missing regression/live tests — final list
+
+In addition to the previously recorded gaps, add coverage for:
+
+- oversized encoded HealthConfig metadata / annotation rejection (HC-AUD-009);
+- health-aware state after `docker rename` (HC-AUD-010), if kept in scope;
+- literal `$(VAR)` argv preservation for direct `CMD` health checks (HC-AUD-011).
 
 This file is updated during the audit so progress and findings survive chat interruption.
