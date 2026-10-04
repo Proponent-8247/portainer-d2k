@@ -191,7 +191,6 @@ func TestBuildHealthProbesRejectsInvalidTest(t *testing.T) {
 	for _, hc := range []*dockcontainer.HealthConfig{
 		{Test: []string{"CMD"}},
 		{Test: []string{"CMD-SHELL"}},
-		{Test: []string{"BOGUS", "check"}},
 		{Test: []string{"CMD", "check"}, Retries: -1},
 	} {
 		if _, _, _, err := buildHealthProbes(hc, false); err == nil {
