@@ -25,6 +25,26 @@ const (
 // cannot be represented safely by d2k.
 var ErrInvalidHealthcheck = errors.New("invalid Docker healthcheck")
 
+func validateHealthcheckForMonitor(hc *dockcontainer.HealthConfig) ([]string, error) {
+	if hc == nil {
+		return nil, nil
+	}
+	if err := validateDockerHealthcheck(hc); err != nil {
+		return nil, err
+	}
+	_, disabled, warning, err := dockerHealthCommand(hc.Test)
+	if err != nil {
+		return nil, err
+	}
+	if disabled {
+		return nil, nil
+	}
+	if warning != "" {
+		return []string{warning}, nil
+	}
+	return nil, nil
+}
+
 // buildHealthProbes translates an explicit Docker healthcheck into Kubernetes
 // exec probes. Standalone containers get readiness only because Docker Engine
 // health status does not itself restart a container. Swarm services also get a
