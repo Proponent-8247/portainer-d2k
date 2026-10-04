@@ -91,11 +91,11 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Service inspection by ID** — `docker service inspect <ID>` works with the full ID, any unique prefix (matching Docker CLI behaviour), or the service name.
 
-**Health checks** — explicit Docker/Compose health checks are translated to Kubernetes exec probes. Standalone containers use readiness only; Swarm services use readiness plus liveness so failed health checks can restart the task-equivalent container.
-
 **Uptime formatting** — `docker ps` STATUS column shows human-readable uptime (e.g. `8 days`) rather than raw duration.
 
 ### Partially supported
+
+**Health checks** — explicit Docker/Compose health checks are translated to Kubernetes exec probes, with documented differences around image inheritance, start-period timing, and Swarm task replacement semantics.
 
 **NFS volumes** — volumes with `driver_opts.type: nfs` are supported when the cluster has `nfs.csi.k8s.io` installed with a StorageClass whose `parameters.server` matches the `addr=` value in the compose `driver_opts.o`. d2k locates the matching StorageClass automatically and creates a `ReadWriteMany` PVC using it. If no matching StorageClass is found, the deploy is blocked with an error indicating exactly what is required. Other NFS provisioners (e.g. `nfs-subdir-external-provisioner`) are not supported for automatic matching because their server address is not stored in the StorageClass spec.
 
@@ -125,16 +125,17 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 d2k translates explicit Docker health checks supplied through `docker run`, `docker service`, or Compose/stack service specifications into Kubernetes exec probes.
 
 - `CMD` health checks become direct Kubernetes exec commands.
-- `CMD-SHELL` health checks run through `/bin/sh -c`.
+- `CMD-SHELL` health checks run through `/bin/sh -c`. Docker can use image-specific shell metadata; d2k does not inspect that metadata, so non-default image shell behavior is not reproduced.
 - `NONE` disables the translated probe.
-- Standalone containers receive a readiness probe only. Docker Engine health status does not by itself restart a standalone container, so d2k does not add liveness semantics there.
-- Swarm services receive both readiness and liveness probes. This approximates Swarm behavior where a task that fails its health check is replaced.
-- Docker's default `interval=30s`, `timeout=30s`, and `retries=3` are used when an explicit health command omits those values.
-- Kubernetes probe timing is whole-second precision. Sub-second Docker durations are rounded up to one second.
-- `start_period` is approximated with Kubernetes `initialDelaySeconds`. Kubernetes does not run the probe during that delay, whereas Docker can run checks during its start period and end the start period early after a success.
+- Standalone containers receive a readiness probe only. The generated Services publish not-ready addresses so health status does not remove an unhealthy standalone container from Docker-style DNS or published-port reachability.
+- Swarm services receive both readiness and liveness probes. Readiness gates service traffic and liveness restarts the Kubernetes container after the configured failure threshold. This approximates Swarm task replacement, but the Pod/task identity is not replaced and the health command is executed independently by both probes.
+- The first translated probe is delayed by one health interval when no `start_period` is configured, matching Docker's normal first-check delay as closely as Kubernetes whole-second timing permits.
+- Kubernetes probe timing is whole-second precision. Docker durations below one second are rounded up after Docker's 1 ms minimum-duration validation.
+- `start_period` is approximated with Kubernetes `initialDelaySeconds`. Kubernetes does not run the probe during that delay, whereas Docker runs checks during its start period and can become healthy before the period expires.
 - `start_interval` is retained in Docker API readback but has no exact Kubernetes probe equivalent.
+- `docker inspect` health status is derived from Kubernetes readiness. Probe output/history is not available through the Kubernetes Pod status, so Docker's health log is not reproduced and the reported failing streak is only a threshold-level approximation.
 
-d2k does not inspect container-image metadata. If the Docker API request asks to inherit an image-defined `HEALTHCHECK` without providing the check command, d2k cannot reconstruct that image health check and returns a warning instead of inventing one.
+Docker merges zero-valued health settings with image `HEALTHCHECK` metadata before applying daemon defaults. d2k does not inspect container-image metadata. If the API request asks to inherit an image-defined health command, d2k returns a warning and does not invent one; when an explicit command is present but timing/retry values are zero, d2k uses Docker daemon defaults rather than unknown image-specific values.
 
 ---
 
