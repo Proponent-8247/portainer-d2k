@@ -649,11 +649,11 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string, runtimeState wo
 
 	healthcheck, _ := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
 	if healthcheckEnabled(healthcheck) {
-		healthStatus := container.Starting
+		healthStatus := dockertypes.Starting
 		if runtimeState.Ready {
-			healthStatus = container.Healthy
+			healthStatus = dockertypes.Healthy
 		}
-		state.Health = &container.Health{Status: healthStatus}
+		state.Health = &dockertypes.Health{Status: healthStatus}
 	}
 
 	hostConfig := &container.HostConfig{
