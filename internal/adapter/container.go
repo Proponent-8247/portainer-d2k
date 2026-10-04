@@ -648,7 +648,12 @@ func dockerHealthStatus(d appsv1.Deployment, runtimeState workloadRuntimeState) 
 	if threshold < 1 {
 		threshold = 1
 	}
-	unhealthyAfterSeconds := int64(probe.InitialDelaySeconds) + (threshold-1)*period
+	initialDelay := int64(probe.InitialDelaySeconds)
+	firstProbeSeconds := int64(0)
+	if initialDelay > 0 {
+		firstProbeSeconds = ((initialDelay + period - 1) / period) * period
+	}
+	unhealthyAfterSeconds := firstProbeSeconds + (threshold-1)*period
 	elapsedSeconds := int64(time.Since(runtimeState.StartedAt) / time.Second)
 	if elapsedSeconds >= unhealthyAfterSeconds {
 		return dockertypes.Unhealthy, int(threshold)
