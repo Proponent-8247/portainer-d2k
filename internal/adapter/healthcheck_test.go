@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"errors"
-	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,96 +12,68 @@ import (
 	"github.com/portainer/d2k/internal/types"
 )
 
-func TestBuildHealthProbesStandaloneUsesReadinessOnly(t *testing.T) {
+func TestValidateHealthcheckForMonitorAcceptsExplicitCMD(t *testing.T) {
 	hc := &dockcontainer.HealthConfig{
 		Test:     []string{"CMD", "curl", "-f", "http://localhost/health"},
 		Interval: 5 * time.Second,
 		Timeout:  2 * time.Second,
 		Retries:  4,
 	}
-
-	readiness, liveness, warnings, err := buildHealthProbes(hc, false)
+	warnings, err := validateHealthcheckForMonitor(hc)
 	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	if liveness != nil {
-		t.Fatal("standalone Docker healthcheck must not create a liveness probe")
+		t.Fatalf("validateHealthcheckForMonitor: %v", err)
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %#v", warnings)
 	}
-	if readiness == nil || readiness.Exec == nil {
-		t.Fatal("readiness exec probe was not created")
-	}
-	wantCommand := []string{"curl", "-f", "http://localhost/health"}
-	if !reflect.DeepEqual(readiness.Exec.Command, wantCommand) {
-		t.Fatalf("command = %#v, want %#v", readiness.Exec.Command, wantCommand)
-	}
-	if readiness.InitialDelaySeconds != 5 || readiness.PeriodSeconds != 5 || readiness.TimeoutSeconds != 2 || readiness.FailureThreshold != 4 {
-		t.Fatalf("unexpected probe timing: %#v", readiness)
-	}
 }
 
-func TestBuildHealthProbesSwarmAddsLiveness(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{
-		Test: []string{"CMD-SHELL", "wget -qO- http://localhost || exit 1"},
-	}
-
-	readiness, liveness, _, err := buildHealthProbes(hc, true)
+func TestDockerHealthCommandCMDPreservesLiteralArgv(t *testing.T) {
+	command, disabled, warning, err := dockerHealthCommand([]string{"CMD", "check", "$(FOO)", "$BAR"})
 	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
+		t.Fatalf("dockerHealthCommand: %v", err)
 	}
-	if readiness == nil || liveness == nil {
-		t.Fatalf("expected readiness and liveness probes, got %#v %#v", readiness, liveness)
+	if disabled || warning != "" {
+		t.Fatalf("unexpected disabled/warning: %v %q", disabled, warning)
 	}
-	want := []string{"/bin/sh", "-c", "wget -qO- http://localhost || exit 1"}
-	if !reflect.DeepEqual(readiness.Exec.Command, want) || !reflect.DeepEqual(liveness.Exec.Command, want) {
-		t.Fatalf("unexpected shell command: readiness=%#v liveness=%#v", readiness.Exec.Command, liveness.Exec.Command)
-	}
-	if readiness.InitialDelaySeconds != 30 || readiness.PeriodSeconds != 30 || readiness.TimeoutSeconds != 30 || readiness.FailureThreshold != 3 {
-		t.Fatalf("Docker defaults were not applied: %#v", readiness)
+	want := []string{"check", "$(FOO)", "$BAR"}
+	if !reflect.DeepEqual(command, want) {
+		t.Fatalf("command = %#v, want %#v", command, want)
 	}
 }
 
-func TestBuildHealthProbesNoneDisablesHealthcheck(t *testing.T) {
+func TestDockerHealthCommandCMDShellPreservesArguments(t *testing.T) {
+	command, disabled, warning, err := dockerHealthCommand([]string{"CMD-SHELL", "printf '%s' "$0"", "arg-zero"})
+	if err != nil {
+		t.Fatalf("dockerHealthCommand: %v", err)
+	}
+	if disabled || warning != "" {
+		t.Fatalf("unexpected disabled/warning: %v %q", disabled, warning)
+	}
+	want := []string{"/bin/sh", "-c", "printf '%s' "$0"", "arg-zero"}
+	if !reflect.DeepEqual(command, want) {
+		t.Fatalf("command = %#v, want %#v", command, want)
+	}
+}
+
+func TestValidateHealthcheckNoneDisablesMonitor(t *testing.T) {
 	hc := &dockcontainer.HealthConfig{Test: []string{"NONE"}}
-	readiness, liveness, warnings, err := buildHealthProbes(hc, true)
+	warnings, err := validateHealthcheckForMonitor(hc)
 	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
+		t.Fatalf("validateHealthcheckForMonitor: %v", err)
 	}
-	if readiness != nil || liveness != nil || len(warnings) != 0 {
-		t.Fatalf("NONE should disable probes, got readiness=%#v liveness=%#v warnings=%#v", readiness, liveness, warnings)
+	if len(warnings) != 0 {
+		t.Fatalf("NONE returned warnings: %#v", warnings)
+	}
+	if healthcheckEnabled(hc) {
+		t.Fatal("NONE must not enable health monitoring")
 	}
 }
 
-func TestBuildHealthProbesStartPeriodAndRounding(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{
-		Test:          []string{"CMD", "check"},
-		Interval:      1500 * time.Millisecond,
-		Timeout:       250 * time.Millisecond,
-		StartPeriod:   2500 * time.Millisecond,
-		StartInterval: 500 * time.Millisecond,
-		Retries:       2,
-	}
-	readiness, _, warnings, err := buildHealthProbes(hc, false)
+func TestValidateHealthcheckInheritedWarns(t *testing.T) {
+	warnings, err := validateHealthcheckForMonitor(&dockcontainer.HealthConfig{})
 	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	if readiness.PeriodSeconds != 2 || readiness.TimeoutSeconds != 1 || readiness.InitialDelaySeconds != 3 {
-		t.Fatalf("unexpected rounded timing: %#v", readiness)
-	}
-	if len(warnings) != 2 {
-		t.Fatalf("expected start-period/start-interval warnings, got %#v", warnings)
-	}
-}
-
-func TestBuildHealthProbesInheritedHealthcheckWarns(t *testing.T) {
-	readiness, liveness, warnings, err := buildHealthProbes(&dockcontainer.HealthConfig{}, false)
-	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	if readiness != nil || liveness != nil {
-		t.Fatalf("inherited healthcheck should not invent a probe: %#v %#v", readiness, liveness)
+		t.Fatalf("validateHealthcheckForMonitor: %v", err)
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "image-inherited") {
 		t.Fatalf("expected image metadata warning, got %#v", warnings)
@@ -131,28 +102,14 @@ func TestHealthcheckAnnotationRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBuildHealthProbesPreservesCMDShellArguments(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{
-		Test: []string{"CMD-SHELL", "printf '%s' \"$0\"", "arg-zero"},
-	}
-	readiness, _, _, err := buildHealthProbes(hc, false)
-	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	want := []string{"/bin/sh", "-c", "printf '%s' \"$0\"", "arg-zero"}
-	if !reflect.DeepEqual(readiness.Exec.Command, want) {
-		t.Fatalf("command = %#v, want %#v", readiness.Exec.Command, want)
-	}
-}
-
-func TestBuildHealthProbesMatchesDockerMinimumDurationValidation(t *testing.T) {
+func TestValidateHealthcheckMatchesDockerMinimumDurationRules(t *testing.T) {
 	for _, hc := range []*dockcontainer.HealthConfig{
 		{Test: []string{"CMD", "true"}, Interval: time.Nanosecond},
 		{Test: []string{"CMD", "true"}, Timeout: time.Nanosecond},
 		{Test: []string{"CMD", "true"}, StartPeriod: time.Nanosecond},
 		{Test: []string{"CMD", "true"}, StartInterval: time.Nanosecond},
 	} {
-		if _, _, _, err := buildHealthProbes(hc, false); err == nil {
+		if _, err := validateHealthcheckForMonitor(hc); err == nil {
 			t.Fatalf("expected Docker minimum-duration error for %#v", hc)
 		} else if !errors.Is(err, ErrInvalidHealthcheck) {
 			t.Fatalf("error %v is not classified as invalid healthcheck", err)
@@ -160,47 +117,33 @@ func TestBuildHealthProbesMatchesDockerMinimumDurationValidation(t *testing.T) {
 	}
 }
 
-func TestBuildHealthProbesRejectsOverflowDurations(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{
-		Test:     []string{"CMD", "true"},
-		Interval: time.Duration(math.MaxInt64),
-	}
-	if _, _, _, err := buildHealthProbes(hc, false); err == nil {
-		t.Fatal("expected oversized duration to be rejected")
-	} else if !errors.Is(err, ErrInvalidHealthcheck) {
-		t.Fatalf("error %v is not classified as invalid healthcheck", err)
-	}
-}
-
-func TestBuildHealthProbesPreservesUnknownTestTypeWithoutProbe(t *testing.T) {
-	hc := &dockcontainer.HealthConfig{Test: []string{"cmd", "true"}}
-	readiness, liveness, warnings, err := buildHealthProbes(hc, false)
-	if err != nil {
-		t.Fatalf("buildHealthProbes: %v", err)
-	}
-	if readiness != nil || liveness != nil {
-		t.Fatalf("unknown healthcheck type unexpectedly created probes: %#v %#v", readiness, liveness)
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "unknown Docker healthcheck test type") {
-		t.Fatalf("expected unknown-type warning, got %#v", warnings)
-	}
-	if healthcheckEnabled(hc) {
-		t.Fatal("unknown Docker healthcheck type must not be treated as an active monitor")
-	}
-}
-
-func TestBuildHealthProbesRejectsInvalidTest(t *testing.T) {
+func TestValidateHealthcheckRejectsInvalidCommandAndRetries(t *testing.T) {
 	for _, hc := range []*dockcontainer.HealthConfig{
 		{Test: []string{"CMD"}},
 		{Test: []string{"CMD-SHELL"}},
 		{Test: []string{"CMD", "check"}, Retries: -1},
 	} {
-		if _, _, _, err := buildHealthProbes(hc, false); err == nil {
+		if _, err := validateHealthcheckForMonitor(hc); err == nil {
 			t.Fatalf("expected error for %#v", hc)
+		} else if !errors.Is(err, ErrInvalidHealthcheck) {
+			t.Fatalf("error %v is not classified as invalid healthcheck", err)
 		}
 	}
 }
 
+func TestUnknownHealthcheckTypeIsPreservedButNotMonitored(t *testing.T) {
+	hc := &dockcontainer.HealthConfig{Test: []string{"cmd", "true"}}
+	warnings, err := validateHealthcheckForMonitor(hc)
+	if err != nil {
+		t.Fatalf("validateHealthcheckForMonitor: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "unknown Docker healthcheck test type") {
+		t.Fatalf("expected unknown-type warning, got %#v", warnings)
+	}
+	if healthcheckEnabled(hc) {
+		t.Fatal("unknown Docker healthcheck type must not enable monitoring")
+	}
+}
 
 func TestAnnotateHealthcheckRejectsOversizedPayloadWithoutMutation(t *testing.T) {
 	annotations := map[string]string{
