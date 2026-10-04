@@ -19,9 +19,9 @@ Functional fixes are intentionally deferred until the audit is complete.
 - [ ] Review Docker container-create health-check translation.
 - [x] Review Docker inspect/list health-state reporting.
 - [x] Review Swarm/Compose create/update/readback behavior.
-- [ ] Review Docker timing/default semantics.
-- [ ] Review Kubernetes probe semantic mismatches.
-- [ ] Review API validation/error behavior.
+- [x] Review Docker timing/default semantics.
+- [x] Review Kubernetes probe semantic mismatches.
+- [x] Review API validation/error behavior.
 - [ ] Review image-inherited HEALTHCHECK behavior.
 - [x] Review concurrency/restart/readiness edge cases.
 - [ ] Review tests for blind spots and missing failure cases.
@@ -86,5 +86,35 @@ Consequences include:
 Part of this is a pre-existing d2k Swarm restart-policy limitation, but the health-check patch actively depends on liveness to approximate Swarm health failure, so the mismatch is directly exposed by this feature.
 
 Recommended action after audit: either implement health-failure handling through a Swarm-aware controller/lifecycle path, or clearly scope the upstream PR as an approximation and document that RestartPolicy is not honored for health-triggered failures.
+
+### HC-AUD-006 — MEDIUM — Kubernetes probe cadence can diverge materially from Docker health interval semantics
+
+Docker's health monitor waits the configured interval from the end of one probe before starting the next. Kubernetes probe workers are periodic/ticker-driven, and Kubernetes also documents that readiness probes may be executed at times other than `periodSeconds` while a container is not Ready.
+
+Consequences for translated health checks:
+
+- a slow probe can be followed by another Kubernetes probe sooner than Docker would schedule it;
+- readiness may be retried more aggressively while not-ready;
+- failure/success threshold timing can therefore differ even when `periodSeconds`, timeout, and thresholds numerically match Docker;
+- d2k's synthetic `docker inspect` timing estimate assumes the nominal Kubernetes period and cannot observe these extra/shifted probe executions.
+
+This matters most for long-running checks, checks with interval close to execution time, and startup/unhealthy transitions.
+
+Recommended action after audit: document continuous-cadence differences explicitly. If tighter Docker fidelity is required, native Kubernetes probes are insufficient as the sole health state machine.
+
+### HC-AUD-007 — MEDIUM — invalid Swarm healthcheck can leave storage side effects before returning 400
+
+`SwarmCreateService` does not validate/translate the health check immediately after decoding the service spec. Health validation happens only after earlier service preparation, including mount handling that can create fallback PVCs.
+
+An invalid health configuration can therefore:
+
+1. cause d2k to create one or more PVCs;
+2. later fail `buildHealthProbes`;
+3. return the expected HTTP 400;
+4. leave the created storage resources behind even though the service was never created.
+
+Standalone container creation validates the healthcheck during deployment construction before Kubernetes resources are created, so this issue is specific to the Swarm create ordering.
+
+Recommended fix after audit: validate the Docker HealthConfig at the start of `SwarmCreateService`, before any mutating mount/PVC/resource preparation.
 
 This file is updated during the audit so progress and findings survive chat interruption.
