@@ -274,7 +274,8 @@ func (h *Handler) inspectService(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (h *Handler) updateService(w http.ResponseWriter, r *http.Request, id string) {
-	if err := h.adapter.SwarmUpdateService(r.Context(), id, r.Body); err != nil {
+	warnings, err := h.adapter.SwarmUpdateService(r.Context(), id, r.Body)
+	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, adapter.ErrInvalidHealthcheck) {
 			status = http.StatusBadRequest
@@ -283,7 +284,10 @@ func (h *Handler) updateService(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	// Docker API spec requires a JSON body with Warnings array on 200.
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{"Warnings": []string{}})
+	if warnings == nil {
+		warnings = []string{}
+	}
+	httputils.WriteJSON(w, http.StatusOK, map[string]any{"Warnings": warnings})
 }
 
 func (h *Handler) rollbackService(w http.ResponseWriter, r *http.Request, id string) {
