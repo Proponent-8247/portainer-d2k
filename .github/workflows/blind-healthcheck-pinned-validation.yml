@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - blind-validation-healthcheck-6e7d77e
+  pull_request:
 
 permissions:
   contents: read
