@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"errors"
 	"math"
 	"reflect"
 	"strings"
@@ -151,6 +152,8 @@ func TestBuildHealthProbesMatchesDockerMinimumDurationValidation(t *testing.T) {
 	} {
 		if _, _, _, err := buildHealthProbes(hc, false); err == nil {
 			t.Fatalf("expected Docker minimum-duration error for %#v", hc)
+		} else if !errors.Is(err, ErrInvalidHealthcheck) {
+			t.Fatalf("error %v is not classified as invalid healthcheck", err)
 		}
 	}
 }
@@ -162,6 +165,8 @@ func TestBuildHealthProbesRejectsOverflowDurations(t *testing.T) {
 	}
 	if _, _, _, err := buildHealthProbes(hc, false); err == nil {
 		t.Fatal("expected oversized duration to be rejected")
+	} else if !errors.Is(err, ErrInvalidHealthcheck) {
+		t.Fatalf("error %v is not classified as invalid healthcheck", err)
 	}
 }
 
