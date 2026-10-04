@@ -35,6 +35,7 @@ package swarm
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -143,7 +144,11 @@ func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateService(r.Context(), r.Body)
 	if err != nil {
 		h.logger.Warnw("create service failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, adapter.ErrInvalidHealthcheck) {
+			status = http.StatusBadRequest
+		}
+		httputils.WriteError(w, status, err.Error())
 		return
 	}
 	h.logger.Infow("create service response", "resp", resp)
@@ -270,7 +275,11 @@ func (h *Handler) inspectService(w http.ResponseWriter, r *http.Request, id stri
 
 func (h *Handler) updateService(w http.ResponseWriter, r *http.Request, id string) {
 	if err := h.adapter.SwarmUpdateService(r.Context(), id, r.Body); err != nil {
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, adapter.ErrInvalidHealthcheck) {
+			status = http.StatusBadRequest
+		}
+		httputils.WriteError(w, status, err.Error())
 		return
 	}
 	// Docker API spec requires a JSON body with Warnings array on 200.
