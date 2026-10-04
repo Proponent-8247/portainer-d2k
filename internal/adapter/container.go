@@ -55,6 +55,7 @@ type workloadRuntimeState struct {
 	Running   bool
 	Ready     bool
 	StartedAt time.Time
+	Health    *dockertypes.Health
 }
 
 // CreateContainer implements docker run: creates a Deployment and, where
@@ -195,7 +196,8 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 		if deploymentHasTranslatedHealthcheck(d) {
 			runtimeState = runtimeStates[deploymentRuntimeStateKey(d)]
 			if !runtimeState.Running && d.Status.ReadyReplicas > 0 {
-				runtimeState = workloadRuntimeState{Running: true, Ready: true}
+				runtimeState.Running = true
+				runtimeState.Ready = true
 			}
 		}
 		if !all && !runtimeState.Running {
@@ -250,6 +252,9 @@ func (a *KubernetesDockerAdapter) workloadRuntimeStates(ctx context.Context) (ma
 			state := states[name]
 			state.Running = true
 			state.Ready = state.Ready || containerStatus.Ready
+			if health := a.healthStateForPod(pod); health != nil {
+				state.Health = health
+			}
 			started := containerStatus.State.Running.StartedAt.Time
 			if state.StartedAt.IsZero() || started.Before(state.StartedAt) {
 				state.StartedAt = started
@@ -408,7 +413,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 		types.AnnotationImageRef:     opts.Image,
 	}
 
-	readinessProbe, _, healthWarnings, err := buildHealthProbes(opts.Healthcheck, false)
+	healthWarnings, err := validateHealthcheckForMonitor(opts.Healthcheck)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -490,7 +495,6 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 							Env:            envVars,
 							Ports:          containerPorts,
 							Resources:      resourceReqs,
-							ReadinessProbe: readinessProbe,
 						},
 					},
 				},
@@ -635,43 +639,13 @@ func deploymentHasTranslatedHealthcheck(d appsv1.Deployment) bool {
 
 func dockerHealthStatus(d appsv1.Deployment, runtimeState workloadRuntimeState) (string, int) {
 	hc, err := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
-	if err != nil || !healthcheckEnabled(hc) {
+	if err != nil || !healthcheckEnabled(hc) || !runtimeState.Running {
 		return "", 0
 	}
-	if !runtimeState.Running {
-		return "", 0
-	}
-	if runtimeState.Ready {
-		return dockertypes.Healthy, 0
-	}
-	if runtimeState.StartedAt.IsZero() || len(d.Spec.Template.Spec.Containers) == 0 {
+	if runtimeState.Health == nil {
 		return dockertypes.Starting, 0
 	}
-
-	probe := d.Spec.Template.Spec.Containers[0].ReadinessProbe
-	if probe == nil {
-		return dockertypes.Starting, 0
-	}
-
-	period := int64(probe.PeriodSeconds)
-	if period < 1 {
-		period = 1
-	}
-	threshold := int64(probe.FailureThreshold)
-	if threshold < 1 {
-		threshold = 1
-	}
-	initialDelay := int64(probe.InitialDelaySeconds)
-	firstProbeSeconds := int64(0)
-	if initialDelay > 0 {
-		firstProbeSeconds = ((initialDelay + period - 1) / period) * period
-	}
-	unhealthyAfterSeconds := firstProbeSeconds + (threshold-1)*period
-	elapsedSeconds := int64(time.Since(runtimeState.StartedAt) / time.Second)
-	if elapsedSeconds >= unhealthyAfterSeconds {
-		return dockertypes.Unhealthy, int(threshold)
-	}
-	return dockertypes.Starting, 0
+	return string(runtimeState.Health.Status), runtimeState.Health.FailingStreak
 }
 
 // --- converters ---
@@ -747,10 +721,15 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string, runtimeState wo
 	}
 
 	healthcheck, _ := decodeHealthcheckAnnotation(d.Annotations[types.AnnotationHealthcheck])
-	if healthStatus, failingStreak := dockerHealthStatus(d, runtimeState); healthStatus != "" {
-		state.Health = &dockertypes.Health{
-			Status:        healthStatus,
-			FailingStreak: failingStreak,
+	if healthcheckEnabled(healthcheck) && running {
+		if runtimeState.Health != nil {
+			state.Health = runtimeState.Health
+		} else {
+			state.Health = &dockertypes.Health{
+				Status:        dockertypes.Starting,
+				FailingStreak: 0,
+				Log:           []*container.HealthcheckResult{},
+			}
 		}
 	}
 
