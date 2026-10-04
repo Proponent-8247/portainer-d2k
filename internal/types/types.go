@@ -31,6 +31,9 @@ const (
 	// LabelImageRef stores the original image reference as supplied by the Docker client.
 	AnnotationImageRef = LabelPrefix + "/image-ref"
 
+	// AnnotationHealthcheck stores the Docker HealthConfig JSON for API readback.
+	AnnotationHealthcheck = LabelPrefix + "/healthcheck"
+
 	// ServiceTypeLB is the value for LabelServiceType when a LoadBalancer Service was created.
 	ServiceTypeLB = "loadbalancer"
 
