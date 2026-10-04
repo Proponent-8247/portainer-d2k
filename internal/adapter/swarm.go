@@ -2246,6 +2246,13 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, 
 }
 
 
+func podImage(p corev1.Pod) string {
+	if len(p.Spec.Containers) > 0 {
+		return p.Spec.Containers[0].Image
+	}
+	return ""
+}
+
 func swarmTargetContainerName(p corev1.Pod) string {
 	for _, key := range []string{
 		types.LabelSwarmService,
