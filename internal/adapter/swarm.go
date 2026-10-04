@@ -338,6 +338,31 @@ func annotateSwarmRestartPolicy(annotations map[string]string, policy swarmHealt
 	return nil
 }
 
+func swarmServiceUsesDirectHostEndpoint(spec swarmServiceSpec) bool {
+	if strings.EqualFold(spec.EndpointSpec.Mode, "dnsrr") {
+		return true
+	}
+	for _, port := range spec.EndpointSpec.Ports {
+		if strings.EqualFold(port.PublishMode, "host") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateHealthcheckEndpointMode(hc *dockcontainer.HealthConfig, spec swarmServiceSpec, existingDNSRR bool) error {
+	if !healthcheckEnabled(hc) {
+		return nil
+	}
+	if existingDNSRR || swarmServiceUsesDirectHostEndpoint(spec) {
+		return invalidHealthcheckf(
+			"healthchecks with Swarm dnsrr or publish mode=host are not supported: Kubernetes hostPort cannot be withdrawn based on health readiness",
+		)
+	}
+	return nil
+}
+
+
 func setSwarmHealthReadinessGate(podSpec *corev1.PodSpec, enabled bool) {
 	gateType := corev1.PodConditionType(types.HealthReadinessGate)
 	filtered := podSpec.ReadinessGates[:0]
@@ -380,6 +405,9 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
 	}
 	warnings = append(warnings, healthWarnings...)
+	if err := validateHealthcheckEndpointMode(cs.Healthcheck, spec, false); err != nil {
+		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
+	}
 
 	deploymentAnnotations := map[string]string{
 		types.AnnotationImageRef: cs.Image,
@@ -703,15 +731,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// In this mode pods expose ports directly on the node via hostPort, and
 	// the service endpoint returns the individual node IPs rather than a VIP.
 	// No LoadBalancer Service is created — an external LB targets node IPs directly.
-	isDNSRR := spec.EndpointSpec.Mode == "dnsrr"
-	if !isDNSRR {
-		for _, p := range spec.EndpointSpec.Ports {
-			if strings.ToLower(p.PublishMode) == "host" {
-				isDNSRR = true
-				break
-			}
-		}
-	}
+	isDNSRR := swarmServiceUsesDirectHostEndpoint(spec)
 
 	// Build hostPort container ports for dnsrr/host-port mode.
 	var hostPorts []corev1.ContainerPort
@@ -1016,6 +1036,13 @@ func applySwarmServiceUpdate(target *appsv1.Deployment, spec swarmServiceSpec) (
 	// optimistic-concurrency retry.
 	cs := spec.TaskTemplate.ContainerSpec
 	container := &target.Spec.Template.Spec.Containers[0]
+	if err := validateHealthcheckEndpointMode(
+		cs.Healthcheck,
+		spec,
+		target.Annotations[types.AnnotationEndpointMode] == "dnsrr",
+	); err != nil {
+		return nil, err
+	}
 
 	if cs.Image != "" {
 		container.Image = cs.Image
