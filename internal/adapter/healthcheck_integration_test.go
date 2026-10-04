@@ -691,3 +691,99 @@ func TestKubePodToSwarmTaskReportsUnhealthyMonitorStateFailed(t *testing.T) {
 		t.Fatalf("unhealthy Swarm task message = %#v", status["Message"])
 	}
 }
+
+
+func TestSwarmHealthcheckRejectsDirectHostEndpointModesWithoutSideEffects(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "dnsrr",
+			body: `{
+				"Name":"web",
+				"TaskTemplate":{"ContainerSpec":{
+					"Image":"busybox:latest",
+					"Healthcheck":{"Test":["CMD","true"]}
+				}},
+				"Mode":{"Replicated":{"Replicas":1}},
+				"EndpointSpec":{"Mode":"dnsrr"}
+			}`,
+		},
+		{
+			name: "publish mode host",
+			body: `{
+				"Name":"web",
+				"TaskTemplate":{"ContainerSpec":{
+					"Image":"busybox:latest",
+					"Healthcheck":{"Test":["CMD","true"]}
+				}},
+				"Mode":{"Replicated":{"Replicas":1}},
+				"EndpointSpec":{"Ports":[{
+					"Protocol":"tcp",
+					"TargetPort":8080,
+					"PublishedPort":18080,
+					"PublishMode":"host"
+				}]}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			a := newHealthcheckTestAdapter()
+			if _, err := a.SwarmCreateService(ctx, strings.NewReader(tt.body)); err == nil {
+				t.Fatal("expected direct-host healthcheck combination to be rejected")
+			} else if !errors.Is(err, ErrInvalidHealthcheck) {
+				t.Fatalf("error %v is not classified as invalid healthcheck", err)
+			}
+
+			deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				t.Fatalf("list deployments: %v", err)
+			}
+			if len(deployments.Items) != 0 {
+				t.Fatalf("rejected direct-host healthcheck left deployment side effects: %#v", deployments.Items)
+			}
+		})
+	}
+}
+
+func TestSwarmUpdateRejectsHealthcheckOnExistingDNSRRService(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+
+	createBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{"Image":"busybox:latest"}},
+		"Mode":{"Replicated":{"Replicas":1}},
+		"EndpointSpec":{"Mode":"dnsrr"}
+	}`)
+	if _, err := a.SwarmCreateService(ctx, createBody); err != nil {
+		t.Fatalf("create dnsrr service without healthcheck: %v", err)
+	}
+
+	updateBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{
+			"Image":"busybox:latest",
+			"Healthcheck":{"Test":["CMD","true"]}
+		}},
+		"Mode":{"Replicated":{"Replicas":1}},
+		"EndpointSpec":{"Mode":"dnsrr"}
+	}`)
+	if _, err := a.SwarmUpdateService(ctx, "web", updateBody); err == nil {
+		t.Fatal("expected healthcheck update on dnsrr service to be rejected")
+	} else if !errors.Is(err, ErrInvalidHealthcheck) {
+		t.Fatalf("error %v is not classified as invalid healthcheck", err)
+	}
+
+	deployment, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get dnsrr deployment: %v", err)
+	}
+	if _, exists := deployment.Annotations[types.AnnotationHealthcheck]; exists {
+		t.Fatalf("rejected update persisted healthcheck annotation: %#v", deployment.Annotations)
+	}
+}
