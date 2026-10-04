@@ -692,7 +692,6 @@ func TestKubePodToSwarmTaskReportsUnhealthyMonitorStateFailed(t *testing.T) {
 	}
 }
 
-
 func TestSwarmHealthcheckRejectsDirectHostEndpointModesWithoutSideEffects(t *testing.T) {
 	tests := []struct {
 		name string
