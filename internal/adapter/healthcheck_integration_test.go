@@ -373,6 +373,82 @@ func TestDockerHealthStatusUsesKubernetesProbeTickSchedule(t *testing.T) {
 	}
 }
 
+func TestSwarmUpdateCanRemoveHealthcheck(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+
+	createBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{
+			"Image":"busybox:latest",
+			"Healthcheck":{"Test":["CMD","true"]}
+		}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	if _, err := a.SwarmCreateService(ctx, createBody); err != nil {
+		t.Fatalf("SwarmCreateService: %v", err)
+	}
+
+	updateBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{"Image":"busybox:latest"}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	warnings, err := a.SwarmUpdateService(ctx, "web", updateBody)
+	if err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+
+	deployment, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated deployment: %v", err)
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if container.ReadinessProbe != nil || container.LivenessProbe != nil {
+		t.Fatalf("removed healthcheck left stale probes: readiness=%#v liveness=%#v", container.ReadinessProbe, container.LivenessProbe)
+	}
+	if _, exists := deployment.Annotations[types.AnnotationHealthcheck]; exists {
+		t.Fatalf("removed healthcheck left stale annotation: %#v", deployment.Annotations)
+	}
+}
+
+func TestSwarmUpdateReturnsHealthcheckWarnings(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+
+	createBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{"Image":"busybox:latest"}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	if _, err := a.SwarmCreateService(ctx, createBody); err != nil {
+		t.Fatalf("SwarmCreateService: %v", err)
+	}
+
+	updateBody := strings.NewReader(`{
+		"Name":"web",
+		"TaskTemplate":{"ContainerSpec":{
+			"Image":"busybox:latest",
+			"Healthcheck":{
+				"Test":["CMD","true"],
+				"StartPeriod":10000000000,
+				"StartInterval":1000000000
+			}
+		}},
+		"Mode":{"Replicated":{"Replicas":1}}
+	}`)
+	warnings, err := a.SwarmUpdateService(ctx, "web", updateBody)
+	if err != nil {
+		t.Fatalf("SwarmUpdateService: %v", err)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("expected start-period/start-interval warnings, got %#v", warnings)
+	}
+}
+
 func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
@@ -397,7 +473,7 @@ func TestSwarmUpdateCanDisableHealthcheck(t *testing.T) {
 		}},
 		"Mode":{"Replicated":{"Replicas":1}}
 	}`)
-	if err := a.SwarmUpdateService(ctx, "web", updateBody); err != nil {
+	if _, err := a.SwarmUpdateService(ctx, "web", updateBody); err != nil {
 		t.Fatalf("SwarmUpdateService: %v", err)
 	}
 
