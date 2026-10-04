@@ -53,7 +53,7 @@
 - [x] `go test -race ./...`
 - [x] Portainer normal PR multi-architecture OCI build (executed; normal job fails due HC-BR-019)
 - [x] Freeze blind findings
-- [ ] Reconcile against prior audit only after freeze
+- [x] Reconcile against prior audit only after freeze
 
 ## Findings
 
@@ -590,3 +590,63 @@ Exact-SHA validation completed after the static review. HC-BR-018 and HC-BR-019 
 **Frozen blind finding set:** HC-BR-001 through HC-BR-019.
 
 No finding above will be deleted or rewritten during reconciliation. Any comparison to the prior audit will be added separately. At this checkpoint, `AUDIT-HEALTHCHECK.md` still has not been read, searched, or inspected.
+
+## Reconciliation against prior audit
+
+Reconciliation was performed only after Checkpoint 005 froze HC-BR-001 through HC-BR-019. The prior audit file was then read at the pinned candidate revision. Original blind findings above remain unchanged.
+
+| Blind finding | Reconciliation classification | Prior-audit relationship |
+|---|---|---|
+| HC-BR-001 | **Prior issue appears incompletely fixed** | HC-AUD-005 introduced d2k-owned Swarm replacement/restart handling, but the remediation is one-shot after unhealthy and does not reconcile transient readiness/reservation/delete failures. |
+| HC-BR-002 | **Genuinely new** | Prior audit did not identify monitor-registration ownership/teardown races that can erase a newer registration and create duplicate monitors. |
+| HC-BR-003 | **Prior issue appears incompletely fixed** | HC-AUD-005 claimed MaxAttempts/restart-policy handling; attempt accounting is persisted before replacement succeeds, so failed deletion can consume attempts. |
+| HC-BR-004 | **Prior issue appears incompletely fixed** | HC-AUD-006 claimed Docker interval/start-period scheduling was fixed. Exact Moby comparison shows the remediation clamps StartInterval to the start-period boundary, which Docker 27.3.1 does not do. |
+| HC-BR-005 | **Genuinely new** | HC-AUD-008 addressed exec/infrastructure failures, but did not identify that d2k starts the configured health Timeout before Kubernetes exec establishment while Docker gives exec startup a separate timeout. |
+| HC-BR-006 | **Genuinely new** | Prior audit did not identify Docker's `...` truncation marker mismatch. |
+| HC-BR-007 | **Genuinely new** | Prior audit checked health-config annotation size, but not unbounded growth of the restart-history annotation under the default unlimited policy. |
+| HC-BR-008 | **Prior issue appears incompletely fixed** | HC-AUD-005 claimed MaxAttempts/window were honored. SwarmKit enforces those per slot; d2k's remediation uses one service-global history budget. |
+| HC-BR-009 | **Prior issue appears incompletely fixed** | HC-AUD-005 required replacement to create a new task identity. The remediation creates a new Pod identity but reconstructs slot numbers from current Pod age, so unaffected replicas change slots after replacement. |
+| HC-BR-010 | **Genuinely new** | Prior audit discussed replacement identity but did not identify loss of failed task history / inability to inspect the replaced failed task. |
+| HC-BR-011 | **Prior issue appears incompletely fixed** | HC-AUD-005 claimed restart delay was honored. SwarmKit shuts the old task down and delays replacement start; d2k delays deletion of the unhealthy old task itself. |
+| HC-BR-012 | **Genuinely new** | Prior audit did not test or discuss corrupted restart-policy/history annotations or fail-open fallback behavior. |
+| HC-BR-013 | **Genuinely new** | Prior audit did not examine multiple d2k processes/replicas and duplicate monitor ownership. |
+| HC-BR-014 | **Genuinely new** | Prior audit did not identify the same-Pod container-ID restart race where a cancelled old monitor can overwrite new state or act on the restarted Pod. |
+| HC-BR-015 | **Independently rediscovered** | Prior audit explicitly listed image-defined/inherited HEALTHCHECK and image-specific zero-field defaults as accepted/documented compatibility limitations. Blind review independently reached the same limitation and additionally noted the nil-inheritance path is silent. |
+| HC-BR-016 | **Independently rediscovered** | Prior audit explicitly documented API 1.41 preventing ordinary clients from using health-start-interval. |
+| HC-BR-017 | **Genuinely new** | Prior audit covered infrastructure error semantics but not Docker-compatible timeout diagnostic output. |
+| HC-BR-018 | **Genuinely new** | Prior audit's earlier validated remediation head was reported format-clean, but the pinned Stage 3 candidate fails repository-wide `gofmt -l .` on 13 files. |
+| HC-BR-019 | **Genuinely new** | Prior audit reported an earlier normal PR multi-arch build passed. The candidate-associated current PR workflow fails because BuildKit is given a synthetic `refs/pull/*/merge` remote Git context; exact-SHA local-context multi-arch build succeeds. |
+
+### Reconciliation totals
+
+- Independently rediscovered: **2**
+- Genuinely new: **10**
+- Prior issue appears incompletely fixed: **7**
+- False positives after reconciliation: **0**
+
+The prior audit contained 11 remediated HC-AUD findings plus documented compatibility limits. The blind review does not dispute the fixes that were directly validated there (for example conflict reapplication, target-container readiness, invalid-healthcheck prevalidation, literal CMD argv preservation, and health metadata sizing). It identifies additional failure modes and several incomplete semantic claims in the newer d2k-owned health/restart architecture.
+
+## Final blind-review disposition
+
+**Not ready for upstream submission. Another remediation pass is required.**
+
+Frozen blind severity totals:
+
+- **HIGH:** 5
+- **MEDIUM:** 10
+- **LOW:** 4
+- **CRITICAL:** 0
+- **INFO:** 0
+
+Highest-priority remediation areas:
+
+1. Make unhealthy Swarm replacement a durable reconciled operation rather than a one-shot action, including transient API failure recovery (HC-BR-001 / HC-BR-003).
+2. Fence monitor ownership by exact container generation and eliminate duplicate/stale monitor publication (HC-BR-002 / HC-BR-014).
+3. Implement stable per-slot identity and restart accounting for replicated services (HC-BR-008 / HC-BR-009), with bounded retained failed-task history (HC-BR-010).
+4. Correct restart-delay semantics and persistence robustness (HC-BR-007 / HC-BR-011 / HC-BR-012).
+5. Correct exact Docker timing/timeout/readback mismatches where upstream fidelity is claimed (HC-BR-004 / HC-BR-005 / HC-BR-006 / HC-BR-017).
+6. Resolve the formatting gate and normal PR multi-arch CI context before submission (HC-BR-018 / HC-BR-019).
+
+### Checkpoint 006 — reconciliation complete
+
+Prior audit read only after the blind list was frozen. All 19 blind findings remain preserved. No feature fixes were implemented during this stage. The candidate requires remediation before upstream submission.
