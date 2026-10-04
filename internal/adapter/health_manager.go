@@ -289,7 +289,7 @@ func (a *KubernetesDockerAdapter) monitorDockerHealth(ctx context.Context, spec 
 	}
 }
 
-func nextDockerHealthInterval(hc *dockcontainer.HealthConfig, status dockertypes.HealthStatus, startedAt, now time.Time) time.Duration {
+func nextDockerHealthInterval(hc *dockcontainer.HealthConfig, status dockcontainer.HealthStatus, startedAt, now time.Time) time.Duration {
 	interval := hc.Interval
 	if interval == 0 {
 		interval = dockerDefaultHealthInterval
