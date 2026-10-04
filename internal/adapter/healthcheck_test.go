@@ -170,10 +170,20 @@ func TestBuildHealthProbesRejectsOverflowDurations(t *testing.T) {
 	}
 }
 
-func TestBuildHealthProbesRejectsNonCanonicalTestType(t *testing.T) {
+func TestBuildHealthProbesPreservesUnknownTestTypeWithoutProbe(t *testing.T) {
 	hc := &dockcontainer.HealthConfig{Test: []string{"cmd", "true"}}
-	if _, _, _, err := buildHealthProbes(hc, false); err == nil {
-		t.Fatal("expected lowercase healthcheck type to be rejected")
+	readiness, liveness, warnings, err := buildHealthProbes(hc, false)
+	if err != nil {
+		t.Fatalf("buildHealthProbes: %v", err)
+	}
+	if readiness != nil || liveness != nil {
+		t.Fatalf("unknown healthcheck type unexpectedly created probes: %#v %#v", readiness, liveness)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "unknown Docker healthcheck test type") {
+		t.Fatalf("expected unknown-type warning, got %#v", warnings)
+	}
+	if healthcheckEnabled(hc) {
+		t.Fatal("unknown Docker healthcheck type must not be treated as an active monitor")
 	}
 }
 
