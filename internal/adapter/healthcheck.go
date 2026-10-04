@@ -86,6 +86,13 @@ func buildHealthProbes(hc *dockcontainer.HealthConfig, swarm bool) (readiness, l
 	return readiness, liveness, warnings, nil
 }
 
+func healthcheckEnabled(hc *dockcontainer.HealthConfig) bool {
+	if hc == nil || len(hc.Test) == 0 {
+		return false
+	}
+	return strings.ToUpper(strings.TrimSpace(hc.Test[0])) != "NONE"
+}
+
 func dockerHealthCommand(test []string) (command []string, disabled bool, warning string, err error) {
 	if len(test) == 0 {
 		return nil, false,
