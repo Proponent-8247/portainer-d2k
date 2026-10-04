@@ -15,6 +15,7 @@ package containers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -226,7 +227,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Errorw("CreateContainer failed", "name", name, "error", err)
 		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "already in use") {
+		switch {
+		case errors.Is(err, adapter.ErrInvalidHealthcheck):
+			status = http.StatusBadRequest
+		case strings.Contains(err.Error(), "already in use"):
 			status = http.StatusConflict
 		}
 		httputils.WriteError(w, status, err.Error())
