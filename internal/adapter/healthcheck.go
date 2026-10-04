@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -19,6 +20,10 @@ const (
 	dockerDefaultHealthRetries  = 3
 )
 
+// ErrInvalidHealthcheck identifies Docker health-check configuration that
+// cannot be represented safely by d2k.
+var ErrInvalidHealthcheck = errors.New("invalid Docker healthcheck")
+
 // buildHealthProbes translates an explicit Docker healthcheck into Kubernetes
 // exec probes. Standalone containers get readiness only because Docker Engine
 // health status does not itself restart a container. Swarm services also get a
@@ -26,6 +31,9 @@ const (
 func buildHealthProbes(hc *dockcontainer.HealthConfig, swarm bool) (readiness, liveness *corev1.Probe, warnings []string, err error) {
 	if hc == nil {
 		return nil, nil, nil, nil
+	}
+	if err := validateDockerHealthcheck(hc); err != nil {
+		return nil, nil, nil, err
 	}
 
 	command, disabled, commandWarning, err := dockerHealthCommand(hc.Test)
@@ -51,20 +59,24 @@ func buildHealthProbes(hc *dockcontainer.HealthConfig, swarm bool) (readiness, l
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	initialDelay := period
+	if hc.StartPeriod > 0 {
+		initialDelay = startDelay
+	}
 
 	retries := hc.Retries
 	if retries == 0 {
 		retries = dockerDefaultHealthRetries
 	}
-	if retries < 0 || retries > math.MaxInt32 {
-		return nil, nil, nil, fmt.Errorf("health retries must be between 1 and %d", math.MaxInt32)
+	if retries > math.MaxInt32 {
+		return nil, nil, nil, invalidHealthcheckf("health retries exceed Kubernetes maximum %d", math.MaxInt32)
 	}
 
 	if hc.StartPeriod > 0 {
 		warnings = append(warnings,
 			"Docker health start_period is approximated with Kubernetes initialDelaySeconds; checks do not run during the delay")
 	}
-	if hc.StartInterval > 0 {
+	if hc.StartPeriod > 0 && hc.StartInterval > 0 {
 		warnings = append(warnings,
 			"Docker health start_interval has no exact Kubernetes probe equivalent and is retained for API readback only")
 	}
@@ -73,7 +85,7 @@ func buildHealthProbes(hc *dockcontainer.HealthConfig, swarm bool) (readiness, l
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{Command: command},
 		},
-		InitialDelaySeconds: startDelay,
+		InitialDelaySeconds: initialDelay,
 		PeriodSeconds:       period,
 		TimeoutSeconds:      timeout,
 		FailureThreshold:    int32(retries),
@@ -90,7 +102,31 @@ func healthcheckEnabled(hc *dockcontainer.HealthConfig) bool {
 	if hc == nil || len(hc.Test) == 0 {
 		return false
 	}
-	return strings.ToUpper(strings.TrimSpace(hc.Test[0])) != "NONE"
+	return hc.Test[0] != "NONE"
+}
+
+func validateDockerHealthcheck(hc *dockcontainer.HealthConfig) error {
+	for _, field := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{name: "Interval", value: hc.Interval},
+		{name: "Timeout", value: hc.Timeout},
+		{name: "StartPeriod", value: hc.StartPeriod},
+		{name: "StartInterval", value: hc.StartInterval},
+	} {
+		if field.value != 0 && field.value < dockcontainer.MinimumDuration {
+			return invalidHealthcheckf("%s cannot be less than %s", field.name, dockcontainer.MinimumDuration)
+		}
+	}
+	if hc.Retries < 0 {
+		return invalidHealthcheckf("Retries cannot be negative")
+	}
+	return nil
+}
+
+func invalidHealthcheckf(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalidHealthcheck, fmt.Sprintf(format, args...))
 }
 
 func dockerHealthCommand(test []string) (command []string, disabled bool, warning string, err error) {
@@ -100,22 +136,24 @@ func dockerHealthCommand(test []string) (command []string, disabled bool, warnin
 			nil
 	}
 
-	switch strings.ToUpper(strings.TrimSpace(test[0])) {
+	switch test[0] {
 	case "NONE":
 		return nil, true, "", nil
 	case "CMD":
 		if len(test) < 2 {
-			return nil, false, "", fmt.Errorf("Docker healthcheck CMD requires at least one argument")
+			return nil, false, "", invalidHealthcheckf("Docker healthcheck CMD requires at least one argument")
 		}
 		command = append([]string{}, test[1:]...)
 		return command, false, "", nil
 	case "CMD-SHELL":
-		if len(test) < 2 || strings.TrimSpace(strings.Join(test[1:], " ")) == "" {
-			return nil, false, "", fmt.Errorf("Docker healthcheck CMD-SHELL requires a command")
+		if len(test) < 2 {
+			return nil, false, "", invalidHealthcheckf("Docker healthcheck CMD-SHELL requires a command")
 		}
-		return []string{"/bin/sh", "-c", strings.Join(test[1:], " ")}, false, "", nil
+		command := []string{"/bin/sh", "-c"}
+		command = append(command, test[1:]...)
+		return command, false, "", nil
 	default:
-		return nil, false, "", fmt.Errorf("unsupported Docker healthcheck test form %q", test[0])
+		return nil, false, "", invalidHealthcheckf("unsupported Docker healthcheck test form %q", test[0])
 	}
 }
 
@@ -133,7 +171,10 @@ func probeSeconds(field string, value, defaultValue time.Duration, allowZero boo
 		return 0, fmt.Errorf("%s must be positive", field)
 	}
 
-	seconds := int64((value + time.Second - 1) / time.Second)
+	seconds := int64(value / time.Second)
+	if value%time.Second != 0 {
+		seconds++
+	}
 	if seconds < 1 {
 		seconds = 1
 	}
