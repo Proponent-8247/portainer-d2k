@@ -34,6 +34,18 @@ const (
 	// AnnotationHealthcheck stores the Docker HealthConfig JSON for API readback.
 	AnnotationHealthcheck = LabelPrefix + "/healthcheck"
 
+	// HealthReadinessGate is a custom Pod readiness-gate condition controlled
+	// by d2k's Docker-compatible health monitor for Swarm services.
+	HealthReadinessGate = LabelPrefix + "/health-ready"
+
+	// AnnotationSwarmRestartPolicy stores the normalized Swarm restart policy
+	// used by d2k's health-triggered task replacement logic.
+	AnnotationSwarmRestartPolicy = LabelPrefix + "/swarm-restart-policy"
+
+	// AnnotationHealthRestartHistory stores recent health-triggered restart
+	// timestamps so MaxAttempts/Window survive d2k process restarts.
+	AnnotationHealthRestartHistory = LabelPrefix + "/health-restart-history"
+
 	// ServiceTypeLB is the value for LabelServiceType when a LoadBalancer Service was created.
 	ServiceTypeLB = "loadbalancer"
 
