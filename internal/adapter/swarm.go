@@ -1856,6 +1856,14 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 		versionIndex = uint64(d.Generation)
 	}
 
+	containerSpec := map[string]any{
+		"Image": image,
+		"Env":   envSlice,
+	}
+	if healthcheck != nil {
+		containerSpec["Healthcheck"] = healthcheck
+	}
+
 	return map[string]any{
 		"ID": serviceID,
 		"Version": map[string]any{"Index": versionIndex},
@@ -1865,11 +1873,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 			"Name":   d.Labels[types.LabelSwarmService],
 			"Labels": serviceSpecLabels(d.Labels),
 			"TaskTemplate": map[string]any{
-				"ContainerSpec": map[string]any{
-					"Image":       image,
-					"Env":         envSlice,
-					"Healthcheck": healthcheck,
-				},
+				"ContainerSpec": containerSpec,
 				// Networks: Portainer reads TaskTemplate.Networks to populate the
 				// "Networks" panel in the service detail view.
 				"Networks": []map[string]any{
