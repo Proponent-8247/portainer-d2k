@@ -346,18 +346,20 @@ func (a *KubernetesDockerAdapter) ensureHealthMonitor(parent context.Context, sp
 	a.healthMu.Unlock()
 
 	go func() {
-		defer func() {
-			a.healthMu.Lock()
-			if current := a.healthMonitors[spec.Key]; current != nil && current.token == token {
-				delete(a.healthMonitors, spec.Key)
-			}
-			if owner, ok := a.healthCurrent[spec.PodUID]; ok && owner.key == spec.Key && owner.token == token {
-				delete(a.healthCurrent, spec.PodUID)
-			}
-			a.healthMu.Unlock()
-		}()
+		defer a.releaseHealthMonitorRegistration(spec.Key, spec.PodUID, token)
 		a.monitorDockerHealth(ctx, spec, token, state)
 	}()
+}
+
+func (a *KubernetesDockerAdapter) releaseHealthMonitorRegistration(key, podUID string, token uint64) {
+	a.healthMu.Lock()
+	defer a.healthMu.Unlock()
+	if current := a.healthMonitors[key]; current != nil && current.token == token {
+		delete(a.healthMonitors, key)
+	}
+	if owner, ok := a.healthCurrent[podUID]; ok && owner.key == key && owner.token == token {
+		delete(a.healthCurrent, podUID)
+	}
 }
 
 func (a *KubernetesDockerAdapter) monitorOwns(spec dockerHealthMonitorSpec, token uint64) bool {
