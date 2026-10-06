@@ -60,7 +60,10 @@ func main() {
 	a.LogNFSStorageClasses(context.Background())
 
 	healthCtx, stopHealth := context.WithCancel(context.Background())
-	a.StartHealthManager(healthCtx)
+	if err := a.StartHealthManager(healthCtx); err != nil {
+		stopHealth()
+		logger.Fatalw("unable to start Docker health manager", "error", err)
+	}
 	defer func() {
 		stopHealth()
 		a.StopHealthManager()
