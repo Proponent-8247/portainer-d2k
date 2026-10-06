@@ -397,7 +397,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// Validate and translate health configuration before any mutating service
 	// preparation (notably fallback PVC creation). Invalid Docker input must
 	// fail atomically without leaving Kubernetes resources behind.
-	healthWarnings, err := validateHealthcheckForMonitor(cs.Healthcheck)
+	healthWarnings, err := validateHealthcheckForCreate(cs.Healthcheck)
 	if err != nil {
 		return nil, fmt.Errorf("invalid healthcheck for service %q: %w", name, err)
 	}
