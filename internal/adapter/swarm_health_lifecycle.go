@@ -599,7 +599,6 @@ func healthStateIsUnhealthy(health *dockertypes.Health) bool {
 	return health != nil && health.Status == dockertypes.Unhealthy
 }
 
-
 func (a *KubernetesDockerAdapter) reconcileSwarmHealthLifecycle(ctx context.Context) error {
 	if err := a.healthManagerLeaseOwned(ctx); err != nil {
 		return err

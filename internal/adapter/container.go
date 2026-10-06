@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
@@ -318,41 +318,42 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 
 	return nil
 }
+
 // Rename Container
 func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID, newName string) error {
-    resolved, err := a.resolveDeploymentName(ctx, nameOrID)
-    if err != nil {
-        return err
-    }
+	resolved, err := a.resolveDeploymentName(ctx, nameOrID)
+	if err != nil {
+		return err
+	}
 
-    d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-    if err != nil {
-        return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
-    }
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if err != nil {
+		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
 
-    // Sanitise the new name.
-    newName = strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(newName, "/"), "_", "-"))
-    if len(newName) > 63 {
-        newName = newName[:63]
-    }
-    newName = strings.TrimRight(newName, "-")
+	// Sanitise the new name.
+	newName = strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(newName, "/"), "_", "-"))
+	if len(newName) > 63 {
+		newName = newName[:63]
+	}
+	newName = strings.TrimRight(newName, "-")
 
-    // Create a new Deployment with the new name, copying the spec.
-    newDeployment := d.DeepCopy()
-    newDeployment.Name = newName
-    newDeployment.ResourceVersion = ""
-    newDeployment.UID = ""
+	// Create a new Deployment with the new name, copying the spec.
+	newDeployment := d.DeepCopy()
+	newDeployment.Name = newName
+	newDeployment.ResourceVersion = ""
+	newDeployment.UID = ""
 
-    if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, newDeployment, metav1.CreateOptions{}); err != nil {
-        return fmt.Errorf("unable to create renamed deployment %q: %w", newName, err)
-    }
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, newDeployment, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("unable to create renamed deployment %q: %w", newName, err)
+	}
 
-    // Delete the old Deployment.
-    if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
-        return fmt.Errorf("unable to delete old deployment %q: %w", resolved, err)
-    }
+	// Delete the old Deployment.
+	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("unable to delete old deployment %q: %w", resolved, err)
+	}
 
-    return nil
+	return nil
 }
 
 // InspectContainer implements docker inspect for a single container.
@@ -490,12 +491,12 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:           opts.Name,
-							Image:          opts.Image,
-							Command:        opts.Cmd,
-							Env:            envVars,
-							Ports:          containerPorts,
-							Resources:      resourceReqs,
+							Name:      opts.Name,
+							Image:     opts.Image,
+							Command:   opts.Cmd,
+							Env:       envVars,
+							Ports:     containerPorts,
+							Resources: resourceReqs,
 						},
 					},
 				},

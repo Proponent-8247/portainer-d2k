@@ -14,8 +14,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -50,7 +50,7 @@ func testSwarmPod(name, uid, service, containerID string, created time.Time) cor
 				types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
 				types.LabelSwarmService:   service,
 				types.LabelWorkloadName:   service,
-				"app":                    service,
+				"app":                     service,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -344,4 +344,3 @@ func TestTaskHistoryIsBounded(t *testing.T) {
 		t.Fatalf("old task history was not trimmed: %#v", slot.TaskHistory)
 	}
 }
-

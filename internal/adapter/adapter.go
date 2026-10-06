@@ -24,8 +24,8 @@ import (
 // KubernetesDockerAdapter bridges Docker API calls to a single Kubernetes namespace.
 type KubernetesDockerAdapter struct {
 	// client is the Kubernetes API client.
-	client kubernetes.Interface
-	metricsClient    *metricsclient.Clientset
+	client        kubernetes.Interface
+	metricsClient *metricsclient.Clientset
 
 	// namespace is the target Kubernetes namespace for all operations.
 	namespace string
@@ -48,9 +48,9 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	logger *zap.SugaredLogger
-	prevCPU   map[string]int64
-	prevCPUMu sync.RWMutex
+	logger     *zap.SugaredLogger
+	prevCPU    map[string]int64
+	prevCPUMu  sync.RWMutex
 	networks   map[string]*NetworkSummary
 	networksMu sync.RWMutex
 	// nfsStorageClasses caches nfs.csi.k8s.io StorageClass names discovered at
@@ -61,13 +61,13 @@ type KubernetesDockerAdapter struct {
 	// Docker-compatible health state is owned by d2k instead of inferred from
 	// Kubernetes readiness. Monitors are keyed by pod UID + container ID while
 	// healthStates are keyed by pod UID so API readback follows task identity.
-	healthMu       sync.RWMutex
-	healthStates   map[string]*dockerHealthState
-	healthMonitors map[string]*healthMonitorRegistration
-	healthCurrent  map[string]healthMonitorOwner
+	healthMu        sync.RWMutex
+	healthStates    map[string]*dockerHealthState
+	healthMonitors  map[string]*healthMonitorRegistration
+	healthCurrent   map[string]healthMonitorOwner
 	healthNextToken uint64
-	healthCancel   context.CancelFunc
-	healthExec     healthCommandExecFunc
+	healthCancel    context.CancelFunc
+	healthExec      healthCommandExecFunc
 
 	// Kubernetes Lease identity/fencing for single-active health management.
 	healthLeaseID              string
@@ -99,7 +99,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to reach namespace %q in cluster: %w", opts.Config.Namespace, err)
 	}
 
-// Probe metrics API — optional, failures are non-fatal.
+	// Probe metrics API — optional, failures are non-fatal.
 	mc := initMetricsClient(restCfg)
 	if mc != nil {
 		if probeMetricsAPI(context.Background(), mc, opts.Config.Namespace) {
@@ -111,14 +111,14 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 	}
 
 	return &KubernetesDockerAdapter{
-		client:           client,
-		metricsClient:    mc,
-		restConfig:       restCfg,
-		namespace:        opts.Config.Namespace,
-		apiServerHost:    apiServerHost(restCfg.Host),
-		lowPortThreshold: opts.Config.LowPortThreshold,
-		gpuResourceName:  opts.Config.GPUResourceName,
-		logger:           opts.Logger,
+		client:            client,
+		metricsClient:     mc,
+		restConfig:        restCfg,
+		namespace:         opts.Config.Namespace,
+		apiServerHost:     apiServerHost(restCfg.Host),
+		lowPortThreshold:  opts.Config.LowPortThreshold,
+		gpuResourceName:   opts.Config.GPUResourceName,
+		logger:            opts.Logger,
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},

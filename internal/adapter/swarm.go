@@ -10,9 +10,9 @@
 //
 // Label model:
 //   - All resources created via the Swarm surface carry:
-//       d2k.portainer.io/swarm-managed-by = d2k
-//       d2k.portainer.io/swarm-stack      = <stack name>    (when part of a stack)
-//       d2k.portainer.io/swarm-service    = <service name>
+//     d2k.portainer.io/swarm-managed-by = d2k
+//     d2k.portainer.io/swarm-stack      = <stack name>    (when part of a stack)
+//     d2k.portainer.io/swarm-service    = <service name>
 //   - Swarm-format IDs are stored as annotations so inspect responses return
 //     stable IDs that round-trip correctly through Docker CLI / toolchains.
 package adapter
@@ -85,20 +85,20 @@ func (a *KubernetesDockerAdapter) SwarmIdentity(ctx context.Context) (map[string
 	managerNodeID := swarmID(strings.ToUpper(clusterUID) + "MGR")
 
 	identity := map[string]any{
-		"ID":      swarmClusterID,
-		"NodeID":  managerNodeID,
-		"Version": map[string]any{"Index": uint64(1)},
+		"ID":        swarmClusterID,
+		"NodeID":    managerNodeID,
+		"Version":   map[string]any{"Index": uint64(1)},
 		"CreatedAt": "2024-01-01T00:00:00.000000000Z",
 		"UpdatedAt": "2024-01-01T00:00:00.000000000Z",
 		"Spec": map[string]any{
-			"Name":                 "d2k",
-			"Labels":               map[string]string{},
-			"Orchestration":        map[string]any{"TaskHistoryRetentionLimit": 5},
-			"Raft":                 map[string]any{"SnapshotInterval": 10000, "HeartbeatTick": 1, "ElectionTick": 10},
-			"Dispatcher":           map[string]any{"HeartbeatPeriod": 5000000000},
-			"CAConfig":             map[string]any{},
-			"TaskDefaults":         map[string]any{},
-			"EncryptionConfig":     map[string]any{"AutoLockManagers": false},
+			"Name":             "d2k",
+			"Labels":           map[string]string{},
+			"Orchestration":    map[string]any{"TaskHistoryRetentionLimit": 5},
+			"Raft":             map[string]any{"SnapshotInterval": 10000, "HeartbeatTick": 1, "ElectionTick": 10},
+			"Dispatcher":       map[string]any{"HeartbeatPeriod": 5000000000},
+			"CAConfig":         map[string]any{},
+			"TaskDefaults":     map[string]any{},
+			"EncryptionConfig": map[string]any{"AutoLockManagers": false},
 		},
 		"TLSInfo": map[string]any{
 			"TrustRoot":           "",
@@ -216,12 +216,12 @@ type swarmServiceSpec struct {
 
 	TaskTemplate struct {
 		ContainerSpec struct {
-			Image   string   `json:"Image"`
-			Command []string `json:"Command"`
-			Args    []string `json:"Args"`
-			Env     []string `json:"Env"`
-			Dir     string   `json:"Dir"`
-			User    string   `json:"User"`
+			Image       string                      `json:"Image"`
+			Command     []string                    `json:"Command"`
+			Args        []string                    `json:"Args"`
+			Env         []string                    `json:"Env"`
+			Dir         string                      `json:"Dir"`
+			User        string                      `json:"User"`
 			Healthcheck *dockcontainer.HealthConfig `json:"Healthcheck"`
 			// Secrets injected as volume mounts at /run/secrets/<target>
 			Secrets []struct {
@@ -271,10 +271,10 @@ type swarmServiceSpec struct {
 			} `json:"Reservations"`
 		} `json:"Resources"`
 		RestartPolicy *struct {
-			Condition   string `json:"Condition"`   // none | on-failure | any
-			Delay       int64  `json:"Delay"`       // nanoseconds
+			Condition   string `json:"Condition"` // none | on-failure | any
+			Delay       int64  `json:"Delay"`     // nanoseconds
 			MaxAttempts int64  `json:"MaxAttempts"`
-			Window      int64  `json:"Window"`      // nanoseconds
+			Window      int64  `json:"Window"` // nanoseconds
 		} `json:"RestartPolicy"`
 		Placement struct {
 			Constraints []string `json:"Constraints"` // e.g. "node.role == worker"
@@ -362,7 +362,6 @@ func validateHealthcheckEndpointMode(hc *dockcontainer.HealthConfig, spec swarmS
 	return nil
 }
 
-
 func setSwarmHealthReadinessGate(podSpec *corev1.PodSpec, enabled bool) {
 	gateType := corev1.PodConditionType(types.HealthReadinessGate)
 	filtered := podSpec.ReadinessGates[:0]
@@ -378,7 +377,6 @@ func setSwarmHealthReadinessGate(podSpec *corev1.PodSpec, enabled bool) {
 		})
 	}
 }
-
 
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
 // plus a LoadBalancer Service if ports are published.
@@ -797,7 +795,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 						}
 						return &corev1.Affinity{NodeAffinity: nodeAffinity}
 					}(),
-					Volumes:       volumes,
+					Volumes: volumes,
 					Containers: []corev1.Container{
 						{
 							Name:            name,
@@ -1465,7 +1463,6 @@ func (a *KubernetesDockerAdapter) nodeNameToSwarmID(ctx context.Context) (map[st
 	return m, nil
 }
 
-
 // SwarmInspectTask returns a single Pod as a Swarm task.
 func (a *KubernetesDockerAdapter) SwarmInspectTask(ctx context.Context, id string) (map[string]any, error) {
 	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
@@ -1901,8 +1898,8 @@ func kubeNodeToSwarm(n corev1.Node, apiServerHost string) map[string]any {
 	nodeID := swarmID(string(n.UID))
 
 	return map[string]any{
-		"ID": nodeID,
-		"Version": map[string]any{"Index": uint64(1)},
+		"ID":        nodeID,
+		"Version":   map[string]any{"Index": uint64(1)},
 		"CreatedAt": n.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"UpdatedAt": n.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"Spec": map[string]any{
@@ -1930,7 +1927,7 @@ func kubeNodeToSwarm(n corev1.Node, apiServerHost string) map[string]any {
 					{"Type": "Network", "Name": "bridge"},
 					{"Type": "Network", "Name": "host"},
 					{"Type": "Network", "Name": "null"},
-					{"Type": "Log",     "Name": "json-file"},
+					{"Type": "Log", "Name": "json-file"},
 				},
 			},
 		},
@@ -2097,8 +2094,8 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 	}
 
 	return map[string]any{
-		"ID": serviceID,
-		"Version": map[string]any{"Index": versionIndex},
+		"ID":        serviceID,
+		"Version":   map[string]any{"Index": versionIndex},
 		"CreatedAt": d.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"UpdatedAt": updatedAt.Format("2006-01-02T15:04:05.000000000Z"),
 		"Spec": map[string]any{
@@ -2221,7 +2218,6 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 		"VirtualIPs": virtualIPs,
 	}
 }
-
 
 // swarmServiceEndpointDNSRR builds the Endpoint response for dnsrr/host-port
 // services. Returns the individual node IPs where pods are running, with no
@@ -2354,7 +2350,6 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, 
 	return map[string]any{"Mode": "vip", "Ports": ports}
 }
 
-
 func podImage(p corev1.Pod) string {
 	if len(p.Spec.Containers) > 0 {
 		return p.Spec.Containers[0].Image
@@ -2466,8 +2461,8 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 		taskID = swarmID(string(p.UID))
 	}
 	return map[string]any{
-		"ID": taskID,
-		"Version": map[string]any{"Index": uint64(1)},
+		"ID":        taskID,
+		"Version":   map[string]any{"Index": uint64(1)},
 		"CreatedAt": p.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"UpdatedAt": p.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"Spec": map[string]any{
@@ -2477,9 +2472,9 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 			"Placement": map[string]any{},
 			"Networks":  []any{},
 		},
-		"ServiceID":    serviceID,
-		"Slot":         slot,
-		"NodeID":       nodeSwarmID,
+		"ServiceID": serviceID,
+		"Slot":      slot,
+		"NodeID":    nodeSwarmID,
 		"Status": map[string]any{
 			"State":           state,
 			"Message":         statusErr,

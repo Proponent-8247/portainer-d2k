@@ -55,7 +55,7 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/attach"):
 		h.Attach(w, r)
 	case strings.HasSuffix(path, "/rename"):
-    h.Rename(w, r)
+		h.Rename(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -147,11 +147,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 // createBody mirrors the subset of the Docker create request body that d2k uses.
 type createBody struct {
-	Image        string              `json:"Image"`
-	Cmd          []string            `json:"Cmd"`
-	Env          []string            `json:"Env"`
-	Labels       map[string]string   `json:"Labels"`
-	ExposedPorts map[string]struct{} `json:"ExposedPorts"`
+	Image        string                      `json:"Image"`
+	Cmd          []string                    `json:"Cmd"`
+	Env          []string                    `json:"Env"`
+	Labels       map[string]string           `json:"Labels"`
+	ExposedPorts map[string]struct{}         `json:"ExposedPorts"`
 	Healthcheck  *dockcontainer.HealthConfig `json:"Healthcheck"`
 	HostConfig   struct {
 		PortBindings map[string][]struct {
@@ -220,7 +220,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		PortBindings: portBindings,
 		PublishAll:   body.HostConfig.PublishAllPorts,
 		GPUCount:     gpuCount,
-		Healthcheck:   body.Healthcheck,
+		Healthcheck:  body.Healthcheck,
 	}
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
