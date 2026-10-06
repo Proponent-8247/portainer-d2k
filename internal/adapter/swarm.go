@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1335,7 +1334,7 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 			return nil, podErr
 		}
 		lifecycle, lifecycleErr := a.swarmLifecycleStateForDeployment(ctx, dep)
-		if lifecycleErr != nil && !apierrors.IsNotFound(lifecycleErr) {
+		if lifecycleErr != nil && !errors.IsNotFound(lifecycleErr) {
 			// Corrupt internal lifecycle state is safety-significant. Surface it
 			// rather than fabricating unstable slot identities.
 			return nil, lifecycleErr
