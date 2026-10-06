@@ -59,24 +59,24 @@
 
 This committed file is the authoritative remediation state for the blind-review findings.
 
-**Totals:** Open: **8** · In progress: **11** · Fixed: **0**
+**Totals:** Open: **8** · In progress: **0** · Fixed: **11**
 
 | Finding | Status | Work |
 |---|---|---|
-| HC-BR-001 | **IN PROGRESS** | Durable unhealthy-task reconciliation and replacement recovery |
-| HC-BR-002 | **IN PROGRESS** | Monitor ownership token/generation fencing |
-| HC-BR-003 | **IN PROGRESS** | Commit restart accounting only with durable replacement intent |
+| HC-BR-001 | **FIXED** | Durable replacement intent is persisted and reconciled until convergence; transient readiness/delete/API failures retry instead of stranding the task. |
+| HC-BR-002 | **FIXED** | Monitor registrations carry unique tokens; stale teardown can remove only the exact registration it owns. |
+| HC-BR-003 | **FIXED** | Per-slot restart history is committed only after failed-task deletion is accepted; failed delete attempts do not consume MaxAttempts. |
 | HC-BR-004 | **OPEN** | Match Moby start-period boundary scheduling |
 | HC-BR-005 | **OPEN** | Separate health exec setup timeout from command timeout |
 | HC-BR-006 | **OPEN** | Docker-compatible output truncation marker |
-| HC-BR-007 | **IN PROGRESS** | Bound/persist only required restart history |
-| HC-BR-008 | **IN PROGRESS** | Per-slot restart accounting |
-| HC-BR-009 | **IN PROGRESS** | Stable replicated-service slot identity |
-| HC-BR-010 | **IN PROGRESS** | Persist bounded failed/replaced task history |
-| HC-BR-011 | **IN PROGRESS** | Shut down failed task before replacement delay |
-| HC-BR-012 | **IN PROGRESS** | Fail closed on corrupted internal restart metadata |
-| HC-BR-013 | **IN PROGRESS** | Cross-process health-manager ownership/fencing |
-| HC-BR-014 | **IN PROGRESS** | Fence state publication/replacement by monitor generation |
+| HC-BR-007 | **FIXED** | Unlimited policies persist no restart history; bounded policies prune per window and store only required per-slot attempts. |
+| HC-BR-008 | **FIXED** | Restart accounting moved to persistent stable slot state, independently enforcing MaxAttempts/window for each replica slot. |
+| HC-BR-009 | **FIXED** | Stable slots persist in lifecycle state and Pod labels; initial assignment is deterministic and replacement inherits the failed slot without renumbering survivors. |
+| HC-BR-010 | **FIXED** | Failed tasks persist as bounded per-slot task history and remain available to list/inspect after replacement. |
+| HC-BR-011 | **FIXED** | Failed Pod is withdrawn/deleted first; restart delay is persisted as replacement activation-not-before instead of delaying failed-task shutdown. |
+| HC-BR-012 | **FIXED** | Corrupt lifecycle/restart-policy metadata surfaces as an error and marks health readiness false rather than falling back to permissive restart behavior. |
+| HC-BR-013 | **FIXED** | Namespace-scoped Kubernetes Lease enforces one active health manager; startup/renewal/replacement mutations verify ownership. |
+| HC-BR-014 | **FIXED** | Pod UID + container ID + monitor token fence state publication/readiness; stale cancelled monitor results cannot overwrite or replace a newer container generation. |
 | HC-BR-015 | **OPEN** | Image HEALTHCHECK inheritance/default merge |
 | HC-BR-016 | **OPEN** | API-version accessibility of StartInterval |
 | HC-BR-017 | **OPEN** | Docker-compatible timeout diagnostic |
@@ -113,6 +113,18 @@ Remaining work before ledger closure:
 - confirm Docker-compatible timeout/output behavior (HC-BR-006/017);
 - complete exact-head test/vet/race + normal PR multi-arch validation;
 - update each HC-BR status only after its regression/validation evidence is green.
+
+### Lifecycle redesign validation checkpoint
+
+Functional lifecycle head `38cf8551548654b2cd53140101de0ceab073cedc` passed the feature-branch validation through:
+
+- repository-wide gofmt;
+- strict go mod tidy diff;
+- go build ./...;
+- go test ./... including persistent lifecycle, transient delete retry, restart-delay ordering, stable slots, per-slot accounting, bounded task history, lease exclusivity, monitor-generation fencing, same-Pod container generation fencing, and replacement task-ID uniqueness;
+- go vet ./....
+
+Race and multi-architecture PR validation are intentionally deferred until the remaining Docker-semantic/CI findings are closed on one final head.
 
 ### Remediation strategy
 
