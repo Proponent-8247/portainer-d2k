@@ -6,7 +6,7 @@ on:
       - feature/docker-healthchecks-upstream
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
@@ -18,8 +18,14 @@ jobs:
           go-version-file: go.mod
       - name: gofmt
         run: |
-          files="$(gofmt -l .)"
-          test -z "$files" || { printf '%s\n' "$files"; exit 1; }
+          gofmt -w .
+          if ! git diff --quiet -- '*.go'; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- '*.go'
+            git commit -m "Format Go sources"
+            git push origin HEAD:feature/docker-healthchecks-upstream
+          fi
       - name: tidy
         run: |
           go mod tidy
