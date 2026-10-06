@@ -510,6 +510,15 @@ func appendTaskHistory(slot *swarmHealthSlotState, record swarmHealthTaskRecord)
 	}
 }
 
+func swarmReplacementTaskID(failedTaskID string, now time.Time) string {
+	// swarmID truncates its input to 25 characters, so appending a suffix to an
+	// existing 25-character task ID would collide with the failed task. Hash
+	// the full replacement generation first so every replacement gets a
+	// distinct deterministic Swarm-format ID.
+	sum := sha256.Sum256([]byte(failedTaskID + "\x00replacement\x00" + strconv.FormatInt(now.UnixNano(), 10)))
+	return swarmID(hex.EncodeToString(sum[:]))
+}
+
 func failedTaskRecord(
 	deployment appsv1.Deployment,
 	pod corev1.Pod,
@@ -783,7 +792,7 @@ func (a *KubernetesDockerAdapter) beginSwarmHealthReplacement(
 		if slot.CurrentTaskID != "" {
 			record.ID = slot.CurrentTaskID
 		}
-		replacementTaskID := swarmID(record.ID + "-replacement-" + strconv.FormatInt(now.UnixNano(), 10))
+		replacementTaskID := swarmReplacementTaskID(record.ID, now)
 		slot.Pending = &swarmHealthReplacementIntent{
 			FailedPodUID:      string(pod.UID),
 			FailedPodName:     pod.Name,
