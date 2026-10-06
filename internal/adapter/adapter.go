@@ -63,9 +63,15 @@ type KubernetesDockerAdapter struct {
 	// healthStates are keyed by pod UID so API readback follows task identity.
 	healthMu       sync.RWMutex
 	healthStates   map[string]*dockerHealthState
-	healthMonitors map[string]context.CancelFunc
+	healthMonitors map[string]*healthMonitorRegistration
+	healthCurrent  map[string]healthMonitorOwner
+	healthNextToken uint64
 	healthCancel   context.CancelFunc
 	healthExec     healthCommandExecFunc
+
+	// Kubernetes Lease identity/fencing for single-active health management.
+	healthLeaseID              string
+	healthLeaseResourceVersion string
 }
 
 // Options configures a new KubernetesDockerAdapter.
@@ -117,7 +123,8 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
 		healthStates:      map[string]*dockerHealthState{},
-		healthMonitors:    map[string]context.CancelFunc{},
+		healthMonitors:    map[string]*healthMonitorRegistration{},
+		healthCurrent:     map[string]healthMonitorOwner{},
 	}, nil
 }
 
