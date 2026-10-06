@@ -34,6 +34,40 @@ func newHealthcheckTestAdapter() *KubernetesDockerAdapter {
 	}
 }
 
+func TestCreatePathsWarnWhenImageHealthcheckCannotBeInherited(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("standalone", func(t *testing.T) {
+		a := newHealthcheckTestAdapter()
+		_, warnings, err := a.buildDeployment(ctx, RunOptions{
+			Name:  "standalone",
+			Image: "busybox:latest",
+		}, portmapper.NoService, nil)
+		if err != nil {
+			t.Fatalf("buildDeployment: %v", err)
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "image-defined HEALTHCHECK") {
+			t.Fatalf("expected image-health inheritance warning, got %#v", warnings)
+		}
+	})
+
+	t.Run("swarm", func(t *testing.T) {
+		a := newHealthcheckTestAdapter()
+		result, err := a.SwarmCreateService(ctx, strings.NewReader(`{
+			"Name":"web",
+			"TaskTemplate":{"ContainerSpec":{"Image":"busybox:latest"}},
+			"Mode":{"Replicated":{"Replicas":1}}
+		}`))
+		if err != nil {
+			t.Fatalf("SwarmCreateService: %v", err)
+		}
+		warnings, _ := result["Warnings"].([]string)
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "image-defined HEALTHCHECK") {
+			t.Fatalf("expected image-health inheritance warning, got %#v", result["Warnings"])
+		}
+	})
+}
+
 func TestStandaloneHealthcheckWiresIntoDeploymentAndInspect(t *testing.T) {
 	ctx := context.Background()
 	a := newHealthcheckTestAdapter()
