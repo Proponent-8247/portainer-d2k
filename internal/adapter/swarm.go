@@ -1168,6 +1168,7 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			}
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
+			a.deleteSwarmLifecycleState(ctx, d.Name)
 			return nil
 		}
 	}
