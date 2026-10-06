@@ -497,6 +497,14 @@ func applyDockerHealthResult(state *dockerHealthState, hc *dockcontainer.HealthC
 }
 
 func (a *KubernetesDockerAdapter) runDockerHealthCommand(ctx context.Context, spec dockerHealthMonitorSpec) *dockertypes.HealthcheckResult {
+	return a.runDockerHealthCommandWithSetupBudget(ctx, spec, dockerHealthExecSetupTimeout)
+}
+
+func (a *KubernetesDockerAdapter) runDockerHealthCommandWithSetupBudget(
+	ctx context.Context,
+	spec dockerHealthMonitorSpec,
+	setupBudget time.Duration,
+) *dockertypes.HealthcheckResult {
 	start := time.Now()
 	result := &dockertypes.HealthcheckResult{Start: start}
 
@@ -521,7 +529,7 @@ func (a *KubernetesDockerAdapter) runDockerHealthCommand(ctx context.Context, sp
 	// Give exec establishment its own 30s budget before the configured command
 	// timeout. This avoids charging normal API/kubelet setup latency entirely
 	// against Docker's probe timeout, while remaining bounded if setup wedges.
-	totalBudget := dockerHealthExecSetupTimeout + probeTimeout
+	totalBudget := setupBudget + probeTimeout
 	probeCtx, cancel := context.WithTimeout(ctx, totalBudget)
 	defer cancel()
 
