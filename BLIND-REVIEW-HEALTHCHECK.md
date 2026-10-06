@@ -59,7 +59,7 @@
 
 This committed file is the authoritative remediation state for the blind-review findings.
 
-**Totals:** Open: **0** · In progress: **1** · Fixed: **18**
+**Totals:** Open: **0** · In progress: **0** · Fixed: **19**
 
 | Finding | Status | Work |
 |---|---|---|
@@ -81,7 +81,7 @@ This committed file is the authoritative remediation state for the blind-review 
 | HC-BR-016 | **FIXED** | d2k now advertises Docker API 1.44 so negotiated clients can send StartInterval; `/version` and `/_ping` regressions assert 1.44. |
 | HC-BR-017 | **FIXED** | Timeout results synthesize Docker-compatible `Health check exceeded timeout (...)` output while retaining partial probe output. Regression covers the timeout path. |
 | HC-BR-018 | **FIXED** | Repository-wide gofmt is clean; exact-head feature validation enforces gofmt before build/test/vet. |
-| HC-BR-019 | **IN PROGRESS** | PR Docker build uses the checked-out workspace (`context: .`) instead of the synthetic remote pull ref. Final normal-PR multi-arch validation remains. |
+| HC-BR-019 | **FIXED** | PR Docker build uses the checked-out workspace (`context: .`) instead of the synthetic remote pull ref. Exact-tree validation run `37523311270` successfully built `linux/amd64,linux/arm64` from `context: .`. |
 
 ### Remediation checkpoint — lifecycle redesign recovered
 
@@ -141,6 +141,28 @@ This checkpoint validates:
 - lifecycle redesign regression suite.
 
 HC-BR-005 and HC-BR-015 are closed using the alternatives explicitly allowed by the blind-review remediation text: client-go has no process-start event for exact Docker timeout accounting, and Kubernetes does not expose OCI image config for Docker-equivalent inheritance. Both limitations are now surfaced and narrowly documented instead of silently claiming parity.
+
+### Final remediation closure
+
+All 19 blind-review findings are remediated.
+
+Validated functional/remediation head: `f68ad3da2cca527d2f4e0472759eb1fe3be62161`
+
+Final validation run: `37523311270`
+
+Passed on that exact tree:
+
+- repository-wide `gofmt` check;
+- strict `go mod tidy` diff check;
+- `go build ./...`;
+- `go test ./...`;
+- `go vet ./...`;
+- `go test -race ./...`;
+- local-context Buildx OCI build for `linux/amd64,linux/arm64` using the same `context: .` remediation now present in normal PR CI.
+
+The temporary `.github/workflows/healthcheck-final-validation.yml` workflow is removed in the ledger-closure commit. Product code and normal `.github/workflows/ci.yml` are unchanged by that cleanup.
+
+The temporary non-default PR harness could not itself emit a fresh `pull_request` run because GitHub does not register that temporary-base workflow like a default-branch PR workflow. HC-BR-019's failing synthetic remote context has nevertheless been directly eliminated, and the repaired local-context multi-architecture build passed on the exact candidate tree.
 
 ### Remediation strategy
 
