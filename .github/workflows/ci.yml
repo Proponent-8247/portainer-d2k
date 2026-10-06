@@ -63,6 +63,7 @@ jobs:
         with:
           push: false
           load: false
+          context: .
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ github.sha }}
           tags: ${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
