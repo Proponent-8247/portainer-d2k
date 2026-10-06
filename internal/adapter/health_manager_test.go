@@ -143,6 +143,39 @@ func TestHealthCommandPreservesRemoteExitCode(t *testing.T) {
 	}
 }
 
+func TestHealthCommandTimeoutUsesDockerDiagnostic(t *testing.T) {
+	a := newHealthcheckTestAdapter()
+	a.healthExec = func(
+		ctx context.Context,
+		podName string,
+		containerName string,
+		command []string,
+		stdout, stderr io.Writer,
+	) error {
+		_, _ = io.WriteString(stdout, "partial output")
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	spec := dockerHealthMonitorSpec{
+		PodName:       "web-pod",
+		ContainerName: "web",
+		Healthcheck: dockcontainer.HealthConfig{
+			Test:    []string{"CMD", "check"},
+			Timeout: 2 * time.Millisecond,
+			Retries: 1,
+		},
+	}
+	result := a.runDockerHealthCommandWithSetupBudget(context.Background(), spec, 2*time.Millisecond)
+	if result.ExitCode != -1 {
+		t.Fatalf("timeout exit code = %d, want -1", result.ExitCode)
+	}
+	want := "Health check exceeded timeout (2ms): partial output"
+	if result.Output != want {
+		t.Fatalf("timeout output = %q, want %q", result.Output, want)
+	}
+}
+
 func TestHealthOutputBufferMatchesDockerTruncationMarker(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
