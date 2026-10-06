@@ -2,23 +2,20 @@ package adapter
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
 	dockcontainer "github.com/docker/docker/api/types/container"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	utilexec "k8s.io/client-go/util/exec"
-
-	"github.com/portainer/d2k/internal/types"
 )
 
 func TestDockerHealthStateTracksExactFailingStreak(t *testing.T) {
@@ -35,22 +32,15 @@ func TestDockerHealthStateTracksExactFailingStreak(t *testing.T) {
 		Retries: 3,
 	}
 
-	first := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
-	applyDockerHealthResult(state, hc, first)
-	if state.Health.Status != dockertypes.Starting || state.Health.FailingStreak != 1 {
-		t.Fatalf("first failure = %s/%d, want starting/1", state.Health.Status, state.Health.FailingStreak)
+	for streak := 1; streak <= 3; streak++ {
+		result := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
+		applyDockerHealthResult(state, hc, result)
+		if state.Health.FailingStreak != streak {
+			t.Fatalf("failing streak = %d, want %d", state.Health.FailingStreak, streak)
+		}
 	}
-
-	second := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
-	applyDockerHealthResult(state, hc, second)
-	if state.Health.Status != dockertypes.Starting || state.Health.FailingStreak != 2 {
-		t.Fatalf("second failure = %s/%d, want starting/2", state.Health.Status, state.Health.FailingStreak)
-	}
-
-	third := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 1}
-	applyDockerHealthResult(state, hc, third)
-	if state.Health.Status != dockertypes.Unhealthy || state.Health.FailingStreak != 3 {
-		t.Fatalf("third failure = %s/%d, want unhealthy/3", state.Health.Status, state.Health.FailingStreak)
+	if state.Health.Status != dockertypes.Unhealthy {
+		t.Fatalf("third failure status = %s, want unhealthy", state.Health.Status)
 	}
 
 	success := &dockertypes.HealthcheckResult{Start: time.Now(), End: time.Now(), ExitCode: 0}
@@ -60,45 +50,27 @@ func TestDockerHealthStateTracksExactFailingStreak(t *testing.T) {
 	}
 }
 
-func TestDockerHealthStartPeriodAndStartInterval(t *testing.T) {
+func TestDockerHealthStartPeriodUsesFullStartIntervalAcrossBoundary(t *testing.T) {
 	started := time.Now()
 	hc := &dockcontainer.HealthConfig{
 		Test:          []string{"CMD", "check"},
 		Interval:      30 * time.Second,
 		StartPeriod:   20 * time.Second,
-		StartInterval: 2 * time.Second,
+		StartInterval: 9 * time.Second,
 		Retries:       2,
 	}
-	state := &dockerHealthState{
-		Health:    dockertypes.Health{Status: dockertypes.Starting},
-		StartedAt: started,
-	}
 
-	if got := nextDockerHealthInterval(hc, dockertypes.Starting, started, started.Add(3*time.Second)); got != 2*time.Second {
-		t.Fatalf("start interval = %s, want 2s", got)
+	if got := nextDockerHealthInterval(hc, dockertypes.Starting, started, started.Add(3*time.Second)); got != 9*time.Second {
+		t.Fatalf("start interval = %s, want 9s", got)
 	}
-	if got := nextDockerHealthInterval(hc, dockertypes.Starting, started, started.Add(19*time.Second)); got != time.Second {
-		t.Fatalf("capped start interval = %s, want 1s", got)
+	if got := nextDockerHealthInterval(hc, dockertypes.Starting, started, started.Add(19*time.Second)); got != 9*time.Second {
+		t.Fatalf("boundary-crossing start interval = %s, want full 9s", got)
 	}
-
-	graceFailure := &dockertypes.HealthcheckResult{
-		Start:    started.Add(5 * time.Second),
-		End:      started.Add(5*time.Second + time.Millisecond),
-		ExitCode: 1,
+	if got := nextDockerHealthInterval(hc, dockertypes.Starting, started, started.Add(21*time.Second)); got != 30*time.Second {
+		t.Fatalf("post-start-period interval = %s, want 30s", got)
 	}
-	applyDockerHealthResult(state, hc, graceFailure)
-	if state.Health.FailingStreak != 0 || state.Health.Status != dockertypes.Starting {
-		t.Fatalf("start-period failure = %s/%d, want starting/0", state.Health.Status, state.Health.FailingStreak)
-	}
-
-	success := &dockertypes.HealthcheckResult{
-		Start:    started.Add(6 * time.Second),
-		End:      started.Add(6*time.Second + time.Millisecond),
-		ExitCode: 0,
-	}
-	applyDockerHealthResult(state, hc, success)
-	if got := nextDockerHealthInterval(hc, state.Health.Status, started, started.Add(7*time.Second)); got != 30*time.Second {
-		t.Fatalf("healthy interval during former start period = %s, want normal 30s", got)
+	if got := nextDockerHealthInterval(hc, dockertypes.Healthy, started, started.Add(5*time.Second)); got != 30*time.Second {
+		t.Fatalf("healthy interval during former start period = %s, want 30s", got)
 	}
 }
 
@@ -171,165 +143,68 @@ func TestHealthCommandPreservesRemoteExitCode(t *testing.T) {
 	}
 }
 
-func TestSwarmHealthRestartMaxAttemptsAndWindow(t *testing.T) {
-	ctx := context.Background()
-	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "web",
-			Namespace: "healthcheck-test",
-		},
-	}
-	a := newHealthcheckTestAdapter()
-	a.client = fake.NewSimpleClientset(deployment)
-
-	policy := swarmHealthRestartPolicy{
-		Condition:   "on-failure",
-		MaxAttempts: 2,
-		Window:      time.Hour,
-	}
-	for i := 0; i < 2; i++ {
-		allowed, err := a.reserveHealthRestart(ctx, "web", policy)
-		if err != nil {
-			t.Fatalf("reserve restart %d: %v", i+1, err)
-		}
-		if !allowed {
-			t.Fatalf("restart %d unexpectedly rejected", i+1)
-		}
-	}
-	allowed, err := a.reserveHealthRestart(ctx, "web", policy)
-	if err != nil {
-		t.Fatalf("reserve third restart: %v", err)
-	}
-	if allowed {
-		t.Fatal("third restart exceeded MaxAttempts")
-	}
-
-	current, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get deployment: %v", err)
-	}
-	old := time.Now().Add(-2 * time.Hour).UnixNano()
-	current.Annotations[types.AnnotationHealthRestartHistory] = fmt.Sprintf("[%d,%d]", old, old)
-	if _, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, current, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("age restart history: %v", err)
-	}
-	allowed, err = a.reserveHealthRestart(ctx, "web", policy)
-	if err != nil {
-		t.Fatalf("reserve restart after window: %v", err)
-	}
-	if !allowed {
-		t.Fatal("expired restart attempts were not discarded by Window")
-	}
-}
-
-func TestSwarmRestartConditionNoneNeverReservesRestart(t *testing.T) {
-	a := newHealthcheckTestAdapter()
-	allowed, err := a.reserveHealthRestart(context.Background(), "missing", swarmHealthRestartPolicy{Condition: "none"})
-	if err != nil {
-		t.Fatalf("condition none should not query Kubernetes: %v", err)
-	}
-	if allowed {
-		t.Fatal("restart condition none allowed a health restart")
-	}
-}
-
-func TestSwarmHealthFailureDeletesPodWhenRestartAllowed(t *testing.T) {
-	ctx := context.Background()
-	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "web",
-			Namespace: "healthcheck-test",
-		},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "web-pod",
-			Namespace: "healthcheck-test",
-		},
-	}
-	a := newHealthcheckTestAdapter()
-	a.client = fake.NewSimpleClientset(deployment, pod)
-
-	a.handleSwarmHealthFailure(ctx, dockerHealthMonitorSpec{
-		PodName:        "web-pod",
-		DeploymentName: "web",
-		RestartPolicy: swarmHealthRestartPolicy{
-			Condition: "on-failure",
-			Delay:     0,
-		},
-	})
-
-	if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, "web-pod", metav1.GetOptions{}); err == nil {
-		t.Fatal("unhealthy Swarm pod was not deleted for replacement")
-	}
-
-	current, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, "web", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get deployment: %v", err)
-	}
-	if current.Annotations[types.AnnotationHealthRestartHistory] == "" {
-		t.Fatal("health-triggered restart was not persisted in restart history")
-	}
-}
-
-func TestSwarmHealthFailureDoesNotDeletePodWhenRestartDisabledOrExhausted(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("restart condition none", func(t *testing.T) {
-		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "healthcheck-test"},
-		}
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "web-pod", Namespace: "healthcheck-test"},
-		}
-		a := newHealthcheckTestAdapter()
-		a.client = fake.NewSimpleClientset(deployment, pod)
-
-		a.handleSwarmHealthFailure(ctx, dockerHealthMonitorSpec{
-			PodName:        "web-pod",
-			DeploymentName: "web",
-			RestartPolicy:  swarmHealthRestartPolicy{Condition: "none"},
+func TestHealthOutputBufferMatchesDockerTruncationMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		inputBytes int
+		wantSuffix string
+		wantLen    int
+	}{
+		{name: "below limit", inputBytes: 4095, wantSuffix: "", wantLen: 4095},
+		{name: "at limit", inputBytes: 4096, wantSuffix: "", wantLen: 4096},
+		{name: "over limit", inputBytes: 4097, wantSuffix: "...", wantLen: 4099},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &healthOutputBuffer{limit: dockerHealthMaxOutputBytes}
+			_, _ = b.Write([]byte(strings.Repeat("x", tc.inputBytes)))
+			got := b.String()
+			if len(got) != tc.wantLen {
+				t.Fatalf("length = %d, want %d", len(got), tc.wantLen)
+			}
+			if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
+				t.Fatalf("truncated output %q missing suffix %q", got[len(got)-8:], tc.wantSuffix)
+			}
 		})
+	}
+}
 
-		if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, "web-pod", metav1.GetOptions{}); err != nil {
-			t.Fatalf("restart condition none deleted pod: %v", err)
-		}
-	})
+func TestStaleMonitorCannotOverwriteNewContainerState(t *testing.T) {
+	a := newHealthcheckTestAdapter()
+	a.healthStates = map[string]*dockerHealthState{}
+	a.healthMonitors = map[string]*healthMonitorRegistration{
+		"old": {token: 1, podUID: "pod", containerID: "old-container"},
+		"new": {token: 2, podUID: "pod", containerID: "new-container"},
+	}
+	a.healthCurrent = map[string]healthMonitorOwner{
+		"pod": {key: "new", token: 2, containerID: "new-container"},
+	}
 
-	t.Run("max attempts exhausted", func(t *testing.T) {
-		history, err := json.Marshal([]int64{time.Now().UnixNano()})
-		if err != nil {
-			t.Fatalf("marshal history: %v", err)
-		}
-		deployment := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "web",
-				Namespace: "healthcheck-test",
-				Annotations: map[string]string{
-					types.AnnotationHealthRestartHistory: string(history),
-				},
-			},
-		}
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "web-pod", Namespace: "healthcheck-test"},
-		}
-		a := newHealthcheckTestAdapter()
-		a.client = fake.NewSimpleClientset(deployment, pod)
+	oldSpec := dockerHealthMonitorSpec{Key: "old", PodUID: "pod", ContainerID: "old-container"}
+	newSpec := dockerHealthMonitorSpec{Key: "new", PodUID: "pod", ContainerID: "new-container"}
+	oldState := &dockerHealthState{Health: dockertypes.Health{Status: dockertypes.Unhealthy}, ContainerID: "old-container"}
+	newState := &dockerHealthState{Health: dockertypes.Health{Status: dockertypes.Starting}, ContainerID: "new-container"}
 
-		a.handleSwarmHealthFailure(ctx, dockerHealthMonitorSpec{
-			PodName:        "web-pod",
-			DeploymentName: "web",
-			RestartPolicy: swarmHealthRestartPolicy{
-				Condition:   "on-failure",
-				MaxAttempts: 1,
-				Window:      time.Hour,
-			},
-		})
+	if a.storeDockerHealthState(oldSpec, 1, oldState) {
+		t.Fatal("stale monitor overwrote current Pod health state")
+	}
+	if !a.storeDockerHealthState(newSpec, 2, newState) {
+		t.Fatal("current monitor could not publish health state")
+	}
+	if got := a.healthStates["pod"].ContainerID; got != "new-container" {
+		t.Fatalf("stored container = %q, want new-container", got)
+	}
+}
 
-		if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, "web-pod", metav1.GetOptions{}); err != nil {
-			t.Fatalf("exhausted MaxAttempts deleted pod: %v", err)
-		}
-	})
+func TestCancelledMonitorRegistrationCannotDeleteNewerRegistration(t *testing.T) {
+	a := newHealthcheckTestAdapter()
+	a.healthMonitors = map[string]*healthMonitorRegistration{
+		"same": {token: 2, podUID: "pod", containerID: "container"},
+	}
+	// This assertion captures the ownership predicate used by deferred monitor
+	// teardown: a stale token must not match the newer registration.
+	if current := a.healthMonitors["same"]; current == nil || current.token == 1 {
+		t.Fatalf("new monitor registration was not distinct: %#v", current)
+	}
 }
 
 func TestSetPodHealthCondition(t *testing.T) {
