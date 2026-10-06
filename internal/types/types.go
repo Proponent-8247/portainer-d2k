@@ -78,6 +78,10 @@ const (
 	// derived from the Kubernetes node UID.
 	AnnotationSwarmNodeID = LabelPrefix + "/swarm-node-id"
 
+	// LabelSwarmSlot stores the stable replicated-service slot assigned to a Pod.
+	// It survives d2k process restarts and is preserved across task replacement.
+	LabelSwarmSlot = LabelPrefix + "/swarm-slot"
+
 	// ConfigMapSwarmIdentity is the name of the ConfigMap in the namespace that
 	// stores the stable Swarm cluster identity (swarm ID, manager node ID, etc.)
 	// derived once from the cluster UID and persisted across d2k restarts.
