@@ -423,10 +423,11 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			}
 			return 0
 		}
-		for uid, pod := range live {
+		for _, uid := range orderedUIDs {
 			if assigned[uid] != 0 {
 				continue
 			}
+			pod := live[uid]
 			slotNumber := nextVacant()
 			if slotNumber == 0 {
 				continue
