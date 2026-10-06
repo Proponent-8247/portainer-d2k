@@ -13,8 +13,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -24,7 +25,7 @@ func testSwarmDeployment(name string, replicas int32) appsv1.Deployment {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       name,
 			Namespace:  "healthcheck-test",
-			UID:        "deployment-" + types.UID(name),
+			UID:        k8stypes.UID("deployment-" + name),
 			Generation: 1,
 			Labels: map[string]string{
 				types.LabelManagedBy:      types.LabelManagedByValue,
@@ -42,7 +43,7 @@ func testSwarmPod(name, uid, service, containerID string, created time.Time) cor
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         "healthcheck-test",
-			UID:               types.UID(uid),
+			UID:               k8stypes.UID(uid),
 			CreationTimestamp: metav1.NewTime(created),
 			Labels: map[string]string{
 				types.LabelManagedBy:      types.LabelManagedByValue,
@@ -262,4 +263,3 @@ func TestTaskHistoryIsBounded(t *testing.T) {
 	}
 }
 
-var _ = schema.GroupResource{}
