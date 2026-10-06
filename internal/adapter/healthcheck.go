@@ -25,9 +25,7 @@ var ErrInvalidHealthcheck = errors.New("invalid Docker healthcheck")
 
 func validateHealthcheckForMonitor(hc *dockcontainer.HealthConfig) ([]string, error) {
 	if hc == nil {
-		return []string{
-			"d2k does not inspect image metadata: an image-defined HEALTHCHECK, if present, cannot be inherited when the request omits Healthcheck",
-		}, nil
+		return nil, nil
 	}
 	if err := validateDockerHealthcheck(hc); err != nil {
 		return nil, err
@@ -44,6 +42,19 @@ func validateHealthcheckForMonitor(hc *dockcontainer.HealthConfig) ([]string, er
 		return []string{warning}, nil
 	}
 	return nil, nil
+}
+
+func validateHealthcheckForCreate(hc *dockcontainer.HealthConfig) ([]string, error) {
+	warnings, err := validateHealthcheckForMonitor(hc)
+	if err != nil {
+		return nil, err
+	}
+	if hc == nil {
+		warnings = append(warnings,
+			"d2k does not inspect image metadata: an image-defined HEALTHCHECK, if present, cannot be inherited when the create request omits Healthcheck",
+		)
+	}
+	return warnings, nil
 }
 
 func healthcheckEnabled(hc *dockcontainer.HealthConfig) bool {
