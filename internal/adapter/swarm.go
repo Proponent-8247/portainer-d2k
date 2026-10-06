@@ -2421,8 +2421,10 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 			switch {
 			case health == nil:
 				state = "starting"
-			case health.Status == dockertypes.Healthy:
+			case health.Status == dockertypes.Healthy && podHealthConditionReady(p):
 				state = "running"
+			case health.Status == dockertypes.Healthy:
+				state = "starting"
 			case health.Status == dockertypes.Unhealthy:
 				state = "failed"
 			default:
