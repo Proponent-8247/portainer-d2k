@@ -1,0 +1,68 @@
+name: final-healthcheck-validation
+
+on:
+  push:
+    branches:
+      - "validation/healthcheck-final-928e0528"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout exact candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 928e0528ac6025af1e557b60377f8dda8e220324
+
+      - name: verify exact candidate
+        run: test "$(git rev-parse HEAD)" = "928e0528ac6025af1e557b60377f8dda8e220324"
+
+      - name: set up golang
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: verify gofmt
+        run: |
+          files="$(gofmt -l .)"
+          test -z "$files" || { printf '%s\n' "$files"; exit 1; }
+
+      - name: verify go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: race
+        run: go test -race ./...
+
+      - name: verify candidate CI uses local PR context
+        run: |
+          grep -A12 'build multi-arch image and export as oci tarball' .github/workflows/ci.yml | grep -F 'context: .'
+
+      - name: set up qemu
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: set up docker buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: build exact candidate multi-arch image
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          push: false
+          load: false
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=928e0528ac6025af1e557b60377f8dda8e220324
+          outputs: type=oci,dest=/tmp/d2k-healthcheck-final.tar
