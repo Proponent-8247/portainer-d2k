@@ -584,3 +584,284 @@ func (a *KubernetesDockerAdapter) cleanupOrphanSwarmLifecycleStates(ctx context.
 func healthStateIsUnhealthy(health *dockertypes.Health) bool {
 	return health != nil && health.Status == dockertypes.Unhealthy
 }
+
+
+func (a *KubernetesDockerAdapter) reconcileSwarmHealthLifecycle(ctx context.Context) error {
+	if err := a.healthManagerLeaseOwned(ctx); err != nil {
+		return err
+	}
+
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
+	})
+	if err != nil {
+		return fmt.Errorf("unable to list Swarm deployments for health lifecycle: %w", err)
+	}
+
+	active := map[string]struct{}{}
+	var firstErr error
+	for _, deployment := range deployments.Items {
+		active[deployment.Name] = struct{}{}
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("app=%s,%s=%s", deployment.Name, types.LabelSwarmManagedBy, types.LabelSwarmManagedByValue),
+		})
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		state, err := a.ensureSwarmSlotAssignments(ctx, deployment, pods.Items)
+		if err != nil {
+			if deploymentHealthEnabled(deployment) {
+				for _, pod := range pods.Items {
+					_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthStateInvalid", err.Error())
+				}
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !deploymentHealthEnabled(deployment) {
+			continue
+		}
+		if err := a.reconcileSwarmDeploymentHealth(ctx, deployment, pods.Items, state); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	a.cleanupOrphanSwarmLifecycleStates(ctx, active)
+	return firstErr
+}
+
+func (a *KubernetesDockerAdapter) reconcileSwarmDeploymentHealth(
+	ctx context.Context,
+	deployment appsv1.Deployment,
+	pods []corev1.Pod,
+	state *swarmHealthLifecycleState,
+) error {
+	policy, err := decodeSwarmHealthRestartPolicyStrict(deployment.Annotations[types.AnnotationSwarmRestartPolicy])
+	if err != nil {
+		for _, pod := range pods {
+			if pod.Status.Phase == corev1.PodRunning {
+				_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthMetadataInvalid", err.Error())
+			}
+		}
+		return err
+	}
+
+	podsByUID := map[string]corev1.Pod{}
+	for _, pod := range pods {
+		podsByUID[string(pod.UID)] = pod
+	}
+
+	slotNumbers := make([]int, 0, len(state.Slots))
+	for _, slot := range state.Slots {
+		if slot != nil {
+			slotNumbers = append(slotNumbers, slot.Slot)
+		}
+	}
+	sort.Ints(slotNumbers)
+
+	for _, slotNumber := range slotNumbers {
+		slot := state.Slots[slotKey(slotNumber)]
+		if slot == nil {
+			continue
+		}
+
+		if slot.Pending != nil {
+			if err := a.advancePendingSwarmReplacement(ctx, deployment, slotNumber, podsByUID); err != nil {
+				if a.logger != nil {
+					a.logger.Warnw("pending Swarm health replacement not yet converged",
+						"service", deployment.Name, "slot", slotNumber, "error", err)
+				}
+				continue
+			}
+		}
+
+		if slot.CurrentPodUID == "" {
+			continue
+		}
+		pod, ok := podsByUID[slot.CurrentPodUID]
+		if !ok || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		health := a.healthStateForPod(pod)
+		if healthStateIsUnhealthy(health) {
+			if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthUnhealthy", "Docker healthcheck is unhealthy"); err != nil {
+				continue
+			}
+			if slot.Pending == nil {
+				created, err := a.beginSwarmHealthReplacement(ctx, deployment, pod, slotNumber, policy, health)
+				if err != nil {
+					if a.logger != nil {
+						a.logger.Warnw("unable to persist Swarm health replacement intent",
+							"service", deployment.Name, "slot", slotNumber, "error", err)
+					}
+					continue
+				}
+				if !created {
+					// Restart policy definitively forbids replacement. The failed
+					// task remains failed/unready and is not retried.
+					continue
+				}
+			}
+			if err := a.advancePendingSwarmReplacement(ctx, deployment, slotNumber, podsByUID); err != nil && a.logger != nil {
+				a.logger.Warnw("Swarm health replacement retry pending",
+					"service", deployment.Name, "slot", slotNumber, "error", err)
+			}
+			continue
+		}
+
+		if health != nil && health.Status == dockertypes.Healthy {
+			if slot.ActivationNotBefore > time.Now().UnixNano() {
+				_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "RestartDelay", "Swarm restart delay has not elapsed")
+			} else {
+				_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionTrue, "HealthHealthy", "Docker healthcheck is healthy")
+				if slot.ActivationNotBefore != 0 {
+					_, _ = a.mutateSwarmHealthLifecycleState(ctx, deployment, func(current *swarmHealthLifecycleState) (bool, error) {
+						currentSlot := current.Slots[slotKey(slotNumber)]
+						if currentSlot == nil || currentSlot.CurrentPodUID != slot.CurrentPodUID || currentSlot.ActivationNotBefore == 0 {
+							return false, nil
+						}
+						currentSlot.ActivationNotBefore = 0
+						return true, nil
+					})
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (a *KubernetesDockerAdapter) beginSwarmHealthReplacement(
+	ctx context.Context,
+	deployment appsv1.Deployment,
+	pod corev1.Pod,
+	slotNumber int,
+	policy swarmHealthRestartPolicy,
+	health *dockertypes.Health,
+) (bool, error) {
+	if err := a.healthManagerLeaseOwned(ctx); err != nil {
+		return false, err
+	}
+	now := time.Now()
+	created := false
+	_, err := a.mutateSwarmHealthLifecycleState(ctx, deployment, func(state *swarmHealthLifecycleState) (bool, error) {
+		slot := state.ensureSlot(slotNumber)
+		if slot.CurrentPodUID != string(pod.UID) {
+			return false, nil
+		}
+		if slot.Pending != nil {
+			created = true
+			return false, nil
+		}
+
+		before := len(slot.RestartHistory)
+		slot.RestartHistory = pruneRestartHistory(slot.RestartHistory, policy.Window, now)
+		pruned := before != len(slot.RestartHistory)
+		if !restartAllowedForSlot(slot, policy, now) {
+			return pruned, nil
+		}
+
+		record := failedTaskRecord(deployment, pod, slotNumber, slot.CurrentContainerID, now)
+		if slot.CurrentTaskID != "" {
+			record.ID = slot.CurrentTaskID
+		}
+		replacementTaskID := swarmID(record.ID + "-replacement-" + strconv.FormatInt(now.UnixNano(), 10))
+		slot.Pending = &swarmHealthReplacementIntent{
+			FailedPodUID:      string(pod.UID),
+			FailedPodName:     pod.Name,
+			FailedTaskID:      record.ID,
+			FailedContainerID: slot.CurrentContainerID,
+			FailedNodeName:    pod.Spec.NodeName,
+			FailedAt:          now.UnixNano(),
+			Error:             "container unhealthy",
+			ReplacementTaskID: replacementTaskID,
+			Policy:            policy,
+			Task:              record,
+		}
+		created = true
+		_ = health
+		return true, nil
+	})
+	return created, err
+}
+
+func (a *KubernetesDockerAdapter) advancePendingSwarmReplacement(
+	ctx context.Context,
+	deployment appsv1.Deployment,
+	slotNumber int,
+	podsByUID map[string]corev1.Pod,
+) error {
+	state, _, err := a.loadSwarmHealthLifecycleState(ctx, deployment)
+	if err != nil {
+		return err
+	}
+	slot := state.Slots[slotKey(slotNumber)]
+	if slot == nil || slot.Pending == nil || slot.Pending.DeleteCommittedAt != 0 {
+		return nil
+	}
+	pending := *slot.Pending
+
+	if err := a.healthManagerLeaseOwned(ctx); err != nil {
+		return err
+	}
+	if pod, ok := podsByUID[pending.FailedPodUID]; ok {
+		if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthUnhealthy", "Docker healthcheck is unhealthy"); err != nil {
+			return err
+		}
+		if err := a.healthManagerLeaseOwned(ctx); err != nil {
+			return err
+		}
+		if err := a.client.CoreV1().Pods(a.namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+
+	now := time.Now()
+	_, err = a.mutateSwarmHealthLifecycleState(ctx, deployment, func(current *swarmHealthLifecycleState) (bool, error) {
+		currentSlot := current.Slots[slotKey(slotNumber)]
+		if currentSlot == nil || currentSlot.Pending == nil ||
+			currentSlot.Pending.FailedPodUID != pending.FailedPodUID {
+			return false, nil
+		}
+		if currentSlot.Pending.DeleteCommittedAt != 0 {
+			return false, nil
+		}
+		currentSlot.Pending.DeleteCommittedAt = now.UnixNano()
+		currentSlot.Pending.NotBefore = now.Add(currentSlot.Pending.Policy.Delay).UnixNano()
+
+		// Swarm counts a restart when replacement has been committed, not when a
+		// transient delete attempt is merely reserved. Unlimited policy needs no
+		// history at all.
+		if currentSlot.Pending.Policy.MaxAttempts > 0 {
+			currentSlot.RestartHistory = pruneRestartHistory(
+				currentSlot.RestartHistory,
+				currentSlot.Pending.Policy.Window,
+				now,
+			)
+			currentSlot.RestartHistory = append(currentSlot.RestartHistory, now.UnixNano())
+		} else {
+			currentSlot.RestartHistory = nil
+		}
+		appendTaskHistory(currentSlot, currentSlot.Pending.Task)
+		if currentSlot.CurrentPodUID == pending.FailedPodUID {
+			currentSlot.CurrentPodUID = ""
+			currentSlot.CurrentPodName = ""
+			currentSlot.CurrentContainerID = ""
+			currentSlot.CurrentTaskID = ""
+		}
+		return true, nil
+	})
+	return err
+}
+
+func (a *KubernetesDockerAdapter) swarmLifecycleStateForDeployment(
+	ctx context.Context,
+	deployment appsv1.Deployment,
+) (*swarmHealthLifecycleState, error) {
+	state, _, err := a.loadSwarmHealthLifecycleState(ctx, deployment)
+	return state, err
+}
