@@ -474,6 +474,7 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 
 	a := newHealthcheckTestAdapter()
 	a.client = fake.NewSimpleClientset(deployment, pod)
+	a.healthStates = map[string]*dockerHealthState{}
 	a.healthStates[string(pod.UID)] = &dockerHealthState{
 		Health:      dockertypes.Health{Status: dockertypes.Healthy},
 		StartedAt:   started.Time,
