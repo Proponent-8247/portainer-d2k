@@ -625,7 +625,7 @@ func TestKubePodToSwarmTaskUsesTargetContainerHealthNotSidecar(t *testing.T) {
 		},
 	}
 
-	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{Status: dockertypes.Starting})
+	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{Status: dockertypes.Starting}, "")
 	status := task["Status"].(map[string]any)
 	if status["State"] != "starting" {
 		t.Fatalf("ready sidecar incorrectly made healthchecked target task running: %#v", status)
@@ -649,7 +649,7 @@ func TestKubePodToSwarmTaskWithHealthcheckAndNoContainerStatusIsStarting(t *test
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{Status: dockertypes.Healthy})
+	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{Status: dockertypes.Healthy}, "")
 	status := task["Status"].(map[string]any)
 	if status["State"] != "starting" {
 		t.Fatalf("empty container status must not report healthchecked task running: %#v", status)
