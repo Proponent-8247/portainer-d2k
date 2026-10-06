@@ -415,7 +415,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 		types.AnnotationImageRef:     opts.Image,
 	}
 
-	healthWarnings, err := validateHealthcheckForMonitor(opts.Healthcheck)
+	healthWarnings, err := validateHealthcheckForCreate(opts.Healthcheck)
 	if err != nil {
 		return nil, nil, err
 	}
