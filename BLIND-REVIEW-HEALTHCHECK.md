@@ -83,6 +83,37 @@ This committed file is the authoritative remediation state for the blind-review 
 | HC-BR-018 | **OPEN** | Repository-wide gofmt cleanup |
 | HC-BR-019 | **OPEN** | PR multi-arch CI local-context fix |
 
+### Remediation checkpoint — lifecycle redesign recovered
+
+Recovered implementation head before stale-test repair: `54e70d0f78bc34262e6c192dde1c462cbd9e474e`.
+
+Implemented lifecycle work already present:
+
+- persistent per-service lifecycle ConfigMap state;
+- stable replica-slot identity and Pod slot labels;
+- per-slot restart history and bounded failed-task history;
+- durable pending replacement intents retried by reconciliation;
+- failed-task shutdown before replacement activation delay;
+- replacement task ID preservation with stable slot inheritance;
+- generation/token fencing for health monitor teardown and state publication;
+- Pod UID + container-ID fencing for same-Pod restarts;
+- namespace Lease ownership to prevent split-brain health managers;
+- fail-closed handling for corrupt lifecycle/restart-policy metadata;
+- cleanup of orphan lifecycle state;
+- PR OCI build switched to checked-out local context.
+
+Current validation exposed only stale test-call signatures after the refactor. Those were repaired in `f4d133905a8707eb440d7842d3cce4c3f6ba7bd1`; exact-head push validation `37513625309` is in progress.
+
+Remaining work before ledger closure:
+
+- resolve any behavioral test failures exposed by the redesigned lifecycle;
+- verify timeout approximation/docs for HC-BR-005;
+- verify explicit image-health inheritance limitation handling for HC-BR-015;
+- validate API 1.44 accessibility for HC-BR-016;
+- confirm Docker-compatible timeout/output behavior (HC-BR-006/017);
+- complete exact-head test/vet/race + normal PR multi-arch validation;
+- update each HC-BR status only after its regression/validation evidence is green.
+
 ### Remediation strategy
 
 The lifecycle findings are being solved as one coherent model rather than local conditionals:
