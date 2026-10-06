@@ -5,7 +5,7 @@ const (
 	Version = "0.1.0"
 
 	// DockerAPIVersion is the Docker API version we claim to implement.
-	DockerAPIVersion = "1.41"
+	DockerAPIVersion = "1.44"
 
 	// LabelPrefix is the prefix for all labels d2k places on Kubernetes resources.
 	LabelPrefix = "d2k.portainer.io"
