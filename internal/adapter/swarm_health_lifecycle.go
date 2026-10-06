@@ -332,6 +332,16 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			if _, ok := live[slot.CurrentPodUID]; !ok {
 				continue
 			}
+			pod := live[slot.CurrentPodUID]
+			containerID := targetContainerID(pod, deploymentRuntimeStateKey(deployment))
+			if slot.CurrentContainerID != containerID {
+				slot.CurrentContainerID = containerID
+				changed = true
+			}
+			if slot.CurrentTaskID == "" {
+				slot.CurrentTaskID = swarmID(slot.CurrentPodUID)
+				changed = true
+			}
 			assigned[slot.CurrentPodUID] = slot.Slot
 			usedSlots[slot.Slot] = slot.CurrentPodUID
 		}
