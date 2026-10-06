@@ -44,6 +44,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: "[preparation] verify gofmt"
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+
       - name: "[preparation] verify go mod tidy"
         run: |
           go mod tidy
