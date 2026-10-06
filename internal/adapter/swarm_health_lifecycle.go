@@ -43,6 +43,7 @@ type swarmHealthSlotState struct {
 	CurrentPodUID       string                        `json:"currentPodUID,omitempty"`
 	CurrentPodName      string                        `json:"currentPodName,omitempty"`
 	CurrentContainerID  string                        `json:"currentContainerID,omitempty"`
+	CurrentTaskID       string                        `json:"currentTaskID,omitempty"`
 	ActivationNotBefore int64                         `json:"activationNotBefore,omitempty"`
 	RestartHistory      []int64                       `json:"restartHistory,omitempty"`
 	Pending             *swarmHealthReplacementIntent `json:"pending,omitempty"`
@@ -59,7 +60,9 @@ type swarmHealthReplacementIntent struct {
 	DeleteCommittedAt int64                    `json:"deleteCommittedAt,omitempty"`
 	NotBefore         int64                    `json:"notBefore,omitempty"`
 	Error             string                   `json:"error,omitempty"`
+	ReplacementTaskID string                   `json:"replacementTaskID"`
 	Policy            swarmHealthRestartPolicy `json:"policy"`
+	Task              swarmHealthTaskRecord    `json:"task"`
 }
 
 type swarmHealthTaskRecord struct {
@@ -309,6 +312,9 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			slot.CurrentPodUID = ""
 			slot.CurrentPodName = ""
 			slot.CurrentContainerID = ""
+			if slot.Pending == nil {
+				slot.CurrentTaskID = ""
+			}
 			changed = true
 		}
 
@@ -345,6 +351,9 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			slot.CurrentPodUID = uid
 			slot.CurrentPodName = pod.Name
 			slot.CurrentContainerID = targetContainerID(pod, deploymentRuntimeStateKey(deployment))
+			if slot.CurrentTaskID == "" {
+				slot.CurrentTaskID = swarmID(uid)
+			}
 			assigned[uid] = slotNumber
 			usedSlots[slotNumber] = uid
 			changed = true
@@ -375,6 +384,10 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			slot.CurrentPodUID = podUID
 			slot.CurrentPodName = pod.Name
 			slot.CurrentContainerID = targetContainerID(pod, deploymentRuntimeStateKey(deployment))
+			slot.CurrentTaskID = slot.Pending.ReplacementTaskID
+			if slot.CurrentTaskID == "" {
+				slot.CurrentTaskID = swarmID(podUID)
+			}
 			slot.ActivationNotBefore = slot.Pending.NotBefore
 			slot.Pending = nil
 			assigned[podUID] = slotNumber
@@ -408,6 +421,7 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			slot.CurrentPodUID = uid
 			slot.CurrentPodName = pod.Name
 			slot.CurrentContainerID = targetContainerID(pod, deploymentRuntimeStateKey(deployment))
+			slot.CurrentTaskID = swarmID(uid)
 			assigned[uid] = slotNumber
 			usedSlots[slotNumber] = uid
 			changed = true
