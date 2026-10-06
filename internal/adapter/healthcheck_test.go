@@ -70,10 +70,10 @@ func TestValidateHealthcheckNoneDisablesMonitor(t *testing.T) {
 	}
 }
 
-func TestValidateHealthcheckNilWarnsAboutImageInheritance(t *testing.T) {
-	warnings, err := validateHealthcheckForMonitor(nil)
+func TestValidateHealthcheckCreateNilWarnsAboutImageInheritance(t *testing.T) {
+	warnings, err := validateHealthcheckForCreate(nil)
 	if err != nil {
-		t.Fatalf("validateHealthcheckForMonitor(nil): %v", err)
+		t.Fatalf("validateHealthcheckForCreate(nil): %v", err)
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "image-defined HEALTHCHECK") {
 		t.Fatalf("expected omitted-healthcheck inheritance warning, got %#v", warnings)
