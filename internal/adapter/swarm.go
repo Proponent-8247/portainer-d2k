@@ -1308,12 +1308,8 @@ func (a *KubernetesDockerAdapter) SwarmServiceLogs(ctx context.Context, w io.Wri
 // from the Deployment so the CLI sees progress immediately.
 // serviceFilter, if non-empty, scopes results to a single service.
 func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFilter, stackFilter string) ([]map[string]any, error) {
-	// Build a node-name -> swarm ID map so task NodeID values match what
-	// GET /nodes returns. The CLI filters out tasks whose NodeID is not in
-	// the active node list, so this must match exactly.
 	nodeSwarmIDs, _ := a.nodeNameToSwarmID(ctx)
 
-	// Always work from Deployments as the source of truth for services.
 	depSelector := types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue
 	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: depSelector})
 	if err != nil {
@@ -1321,39 +1317,36 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 	}
 
 	result := make([]map[string]any, 0)
-
 	for _, dep := range deps.Items {
-		// Resolve stable service ID.
 		svcID := dep.Annotations[types.AnnotationSwarmServiceID]
 		if svcID == "" {
 			svcID = swarmID(string(dep.UID))
 		}
-
-		// Apply service filter if present - match by swarm ID or deployment name.
 		if serviceFilter != "" && serviceFilter != svcID && serviceFilter != dep.Name {
 			continue
 		}
-
-		// Apply stack filter if present - match by stack label.
 		if stackFilter != "" && dep.Labels[types.LabelSwarmStack] != stackFilter {
 			continue
 		}
 
-		// Find pods for this deployment.
 		pods, podErr := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("app=%s,%s=%s", dep.Name, types.LabelSwarmManagedBy, types.LabelSwarmManagedByValue),
 		})
+		if podErr != nil {
+			return nil, podErr
+		}
+		lifecycle, lifecycleErr := a.swarmLifecycleStateForDeployment(ctx, dep)
+		if lifecycleErr != nil && !apierrors.IsNotFound(lifecycleErr) {
+			// Corrupt internal lifecycle state is safety-significant. Surface it
+			// rather than fabricating unstable slot identities.
+			return nil, lifecycleErr
+		}
 
-		// Determine desired replica count.
 		desired := dep.Status.Replicas
 		if dep.Spec.Replicas != nil && *dep.Spec.Replicas > desired {
 			desired = *dep.Spec.Replicas
 		}
 
-		// Pick a fallback node ID for synthetic tasks.
-		// Prefer a known node from the node list; fall back to the node ID
-		// of any already-running pod so synthetic tasks pass the activeNodes
-		// filter in the CLI even if the node list call failed.
 		syntheticNodeID := ""
 		for _, id := range nodeSwarmIDs {
 			syntheticNodeID = id
@@ -1368,48 +1361,88 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 			}
 		}
 
-		// Build a slot -> pod map from real pods.
-		// Sort by creation timestamp so slot assignment is stable across polls.
-		// Oldest pod = slot 1, next oldest = slot 2, etc.
 		podsBySlot := map[int32]corev1.Pod{}
-		if podErr == nil && len(pods.Items) > 0 {
-			sorted := make([]corev1.Pod, len(pods.Items))
-			copy(sorted, pods.Items)
-			sort.Slice(sorted, func(i, j int) bool {
-				return sorted[i].CreationTimestamp.Before(&sorted[j].CreationTimestamp)
-			})
-			for i, p := range sorted {
-				podsBySlot[int32(i+1)] = p
+		for _, p := range pods.Items {
+			slot := parseSwarmSlotLabel(p)
+			if slot <= 0 && lifecycle != nil {
+				if current := lifecycle.slotForPodUID(string(p.UID)); current != nil {
+					slot = current.Slot
+				}
 			}
+			if slot <= 0 {
+				continue
+			}
+			podsBySlot[int32(slot)] = p
 		}
 
-		// Return one task per desired slot: real pod if available, synthetic otherwise.
-		for slot := int32(1); slot <= desired; slot++ {
-			if p, ok := podsBySlot[slot]; ok {
+		for slotNumber := int32(1); slotNumber <= desired; slotNumber++ {
+			slotState := (*swarmHealthSlotState)(nil)
+			if lifecycle != nil {
+				slotState = lifecycle.Slots[slotKey(int(slotNumber))]
+			}
+			if p, ok := podsBySlot[slotNumber]; ok {
 				nodeID := nodeSwarmIDs[p.Spec.NodeName]
-				result = append(result, kubePodToSwarmTask(p, svcID, nodeID, int(slot), a.healthStateForPod(p)))
-			} else {
-				// Pod not yet scheduled - synthesise a preparing task.
-				result = append(result, map[string]any{
-					"ID":        swarmID(fmt.Sprintf("%s-task-%d", string(dep.UID), slot)),
-					"Version":   map[string]any{"Index": uint64(1)},
-					"CreatedAt": dep.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-					"UpdatedAt": dep.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-					"Spec": map[string]any{
-						"ContainerSpec": map[string]any{
-							"Image": dep.Annotations[types.AnnotationImageRef],
-						},
-					},
-					"ServiceID":    svcID,
-					"Slot":         int(slot),
-					"NodeID":       syntheticNodeID,
-					"Status": map[string]any{
-						"State":     "preparing",
-						"Message":   "",
-						"Timestamp": dep.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
-					},
-					"DesiredState": "running",
-				})
+				taskID := ""
+				if slotState != nil && slotState.CurrentPodUID == string(p.UID) {
+					taskID = slotState.CurrentTaskID
+				}
+				result = append(result, kubePodToSwarmTask(
+					p,
+					svcID,
+					nodeID,
+					int(slotNumber),
+					a.healthStateForPod(p),
+					taskID,
+				))
+				continue
+			}
+
+			// A health replacement has a stable task identity before its Pod is
+			// scheduled. Preserve that identity while restart delay/scheduling is
+			// pending instead of inventing a different ID on every poll.
+			taskID := swarmID(fmt.Sprintf("%s-task-%d", string(dep.UID), slotNumber))
+			createdAt := dep.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z")
+			if slotState != nil && slotState.Pending != nil {
+				if slotState.Pending.ReplacementTaskID != "" {
+					taskID = slotState.Pending.ReplacementTaskID
+				}
+				if slotState.Pending.DeleteCommittedAt != 0 {
+					createdAt = time.Unix(0, slotState.Pending.DeleteCommittedAt).UTC().Format("2006-01-02T15:04:05.000000000Z")
+				}
+			}
+			result = append(result, map[string]any{
+				"ID":        taskID,
+				"Version":   map[string]any{"Index": uint64(1)},
+				"CreatedAt": createdAt,
+				"UpdatedAt": createdAt,
+				"Spec": map[string]any{
+					"ContainerSpec": map[string]any{"Image": dep.Annotations[types.AnnotationImageRef]},
+				},
+				"ServiceID": svcID,
+				"Slot":      int(slotNumber),
+				"NodeID":    syntheticNodeID,
+				"Status": map[string]any{
+					"State":     "preparing",
+					"Message":   "",
+					"Timestamp": createdAt,
+				},
+				"DesiredState": "running",
+			})
+		}
+
+		// Preserve bounded failed task history exactly as Swarm does for replaced
+		// tasks. Historical tasks retain their original slot and task ID.
+		if lifecycle != nil {
+			for _, slotState := range lifecycle.Slots {
+				if slotState == nil {
+					continue
+				}
+				for _, record := range slotState.TaskHistory {
+					if nodeID := nodeSwarmIDs[record.NodeName]; nodeID != "" {
+						record.NodeID = nodeID
+					}
+					result = append(result, lifecycleTaskToSwarmTask(record))
+				}
 			}
 		}
 	}
