@@ -200,10 +200,22 @@ func TestCancelledMonitorRegistrationCannotDeleteNewerRegistration(t *testing.T)
 	a.healthMonitors = map[string]*healthMonitorRegistration{
 		"same": {token: 2, podUID: "pod", containerID: "container"},
 	}
-	// This assertion captures the ownership predicate used by deferred monitor
-	// teardown: a stale token must not match the newer registration.
-	if current := a.healthMonitors["same"]; current == nil || current.token == 1 {
-		t.Fatalf("new monitor registration was not distinct: %#v", current)
+	a.healthCurrent = map[string]healthMonitorOwner{
+		"pod": {key: "same", token: 2, containerID: "container"},
+	}
+
+	a.releaseHealthMonitorRegistration("same", "pod", 1)
+
+	if current := a.healthMonitors["same"]; current == nil || current.token != 2 {
+		t.Fatalf("stale teardown removed newer monitor registration: %#v", current)
+	}
+	if owner, ok := a.healthCurrent["pod"]; !ok || owner.token != 2 {
+		t.Fatalf("stale teardown removed newer pod ownership: %#v", owner)
+	}
+
+	a.releaseHealthMonitorRegistration("same", "pod", 2)
+	if _, ok := a.healthMonitors["same"]; ok {
+		t.Fatal("owning monitor teardown did not remove its registration")
 	}
 }
 
