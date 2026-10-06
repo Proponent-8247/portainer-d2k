@@ -304,6 +304,12 @@ func TestRestartDelayAppliesAfterFailedPodShutdown(t *testing.T) {
 	if slot.CurrentPodUID != "uid-b" || slot.ActivationNotBefore == 0 {
 		t.Fatalf("replacement did not inherit slot/delay: %#v", slot)
 	}
+	if slot.CurrentTaskID == "" || slot.CurrentTaskID == swarmID("uid-b") {
+		t.Fatalf("replacement did not preserve reserved Swarm task identity: %#v", slot)
+	}
+	if len(slot.TaskHistory) != 1 || slot.TaskHistory[0].ID == slot.CurrentTaskID {
+		t.Fatalf("failed/replacement task identity history is invalid: %#v", slot)
+	}
 }
 
 func TestCorruptRestartPolicyFailsClosed(t *testing.T) {
