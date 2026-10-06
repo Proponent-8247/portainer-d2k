@@ -55,6 +55,47 @@
 - [x] Freeze blind findings
 - [x] Reconcile against prior audit only after freeze
 
+## Remediation ledger
+
+This committed file is the authoritative remediation state for the blind-review findings.
+
+**Totals:** Open: **8** · In progress: **11** · Fixed: **0**
+
+| Finding | Status | Work |
+|---|---|---|
+| HC-BR-001 | **IN PROGRESS** | Durable unhealthy-task reconciliation and replacement recovery |
+| HC-BR-002 | **IN PROGRESS** | Monitor ownership token/generation fencing |
+| HC-BR-003 | **IN PROGRESS** | Commit restart accounting only with durable replacement intent |
+| HC-BR-004 | **OPEN** | Match Moby start-period boundary scheduling |
+| HC-BR-005 | **OPEN** | Separate health exec setup timeout from command timeout |
+| HC-BR-006 | **OPEN** | Docker-compatible output truncation marker |
+| HC-BR-007 | **IN PROGRESS** | Bound/persist only required restart history |
+| HC-BR-008 | **IN PROGRESS** | Per-slot restart accounting |
+| HC-BR-009 | **IN PROGRESS** | Stable replicated-service slot identity |
+| HC-BR-010 | **IN PROGRESS** | Persist bounded failed/replaced task history |
+| HC-BR-011 | **IN PROGRESS** | Shut down failed task before replacement delay |
+| HC-BR-012 | **IN PROGRESS** | Fail closed on corrupted internal restart metadata |
+| HC-BR-013 | **IN PROGRESS** | Cross-process health-manager ownership/fencing |
+| HC-BR-014 | **IN PROGRESS** | Fence state publication/replacement by monitor generation |
+| HC-BR-015 | **OPEN** | Image HEALTHCHECK inheritance/default merge |
+| HC-BR-016 | **OPEN** | API-version accessibility of StartInterval |
+| HC-BR-017 | **OPEN** | Docker-compatible timeout diagnostic |
+| HC-BR-018 | **OPEN** | Repository-wide gofmt cleanup |
+| HC-BR-019 | **OPEN** | PR multi-arch CI local-context fix |
+
+### Remediation strategy
+
+The lifecycle findings are being solved as one coherent model rather than local conditionals:
+
+1. stable replicated-service slot identity;
+2. one current Pod/container generation per slot;
+3. monitor registrations with explicit ownership tokens and stale-result fencing;
+4. durable per-slot restart intent/history/task history;
+5. single active health-manager ownership across d2k processes;
+6. reconciliation retries until replacement converges or policy definitively forbids it.
+
+After the lifecycle model is green, Docker semantic mismatches and CI/formatting findings will be remediated, then the exact final head will receive tidy/build/test/vet/race and multi-architecture PR validation.
+
 ## Findings
 
 ### HC-BR-001 — HIGH — unhealthy Swarm task can become permanently stranded after a transient replacement-path failure
