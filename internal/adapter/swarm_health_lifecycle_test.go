@@ -239,6 +239,82 @@ func TestReplacementDeleteFailureDoesNotConsumeAttemptAndRetries(t *testing.T) {
 	}
 }
 
+func TestRestartDelayAppliesAfterFailedPodShutdown(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+	a.healthLeaseID = "delay-test"
+	if err := a.acquireHealthManagerLease(ctx); err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	defer a.releaseHealthManagerLease(ctx)
+
+	dep := testSwarmDeployment("web", 1)
+	pod := testSwarmPod("web-a", "uid-a", "web", "containerd://a", time.Now().Add(-time.Minute))
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, dep.DeepCopy(), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	if _, err := a.client.CoreV1().Pods(a.namespace).Create(ctx, pod.DeepCopy(), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	if _, err := a.ensureSwarmSlotAssignments(ctx, dep, []corev1.Pod{pod}); err != nil {
+		t.Fatalf("assign slot: %v", err)
+	}
+
+	delay := time.Hour
+	created, err := a.beginSwarmHealthReplacement(
+		ctx,
+		dep,
+		pod,
+		1,
+		swarmHealthRestartPolicy{Condition: "on-failure", Delay: delay},
+		&dockertypes.Health{Status: dockertypes.Unhealthy},
+	)
+	if err != nil || !created {
+		t.Fatalf("begin replacement: created=%v err=%v", created, err)
+	}
+	beforeDelete := time.Now()
+	if err := a.advancePendingSwarmReplacement(ctx, dep, 1, map[string]corev1.Pod{"uid-a": pod}); err != nil {
+		t.Fatalf("advance replacement: %v", err)
+	}
+	if _, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("failed Pod remained alive during restart delay: %v", err)
+	}
+
+	state, _, err := a.loadSwarmHealthLifecycleState(ctx, dep)
+	if err != nil {
+		t.Fatalf("load lifecycle state: %v", err)
+	}
+	pending := state.Slots["1"].Pending
+	if pending == nil || pending.DeleteCommittedAt == 0 {
+		t.Fatalf("replacement deletion was not committed: %#v", pending)
+	}
+	if got := time.Unix(0, pending.NotBefore); got.Before(beforeDelete.Add(delay - time.Second)) {
+		t.Fatalf("restart delay was not applied to replacement activation: %s", got)
+	}
+
+	replacement := testSwarmPod("web-b", "uid-b", "web", "containerd://b", time.Now())
+	if _, err := a.client.CoreV1().Pods(a.namespace).Create(ctx, replacement.DeepCopy(), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create replacement pod: %v", err)
+	}
+	state, err = a.ensureSwarmSlotAssignments(ctx, dep, []corev1.Pod{replacement})
+	if err != nil {
+		t.Fatalf("assign replacement slot: %v", err)
+	}
+	slot := state.Slots["1"]
+	if slot.CurrentPodUID != "uid-b" || slot.ActivationNotBefore == 0 {
+		t.Fatalf("replacement did not inherit slot/delay: %#v", slot)
+	}
+}
+
+func TestCorruptRestartPolicyFailsClosed(t *testing.T) {
+	if _, err := decodeSwarmHealthRestartPolicyStrict("{"); !errors.Is(err, errCorruptSwarmHealthState) {
+		t.Fatalf("corrupt restart policy error = %v", err)
+	}
+	if policy := decodeSwarmHealthRestartPolicy("{"); policy.Condition != "none" {
+		t.Fatalf("non-strict fallback must fail closed, got %#v", policy)
+	}
+}
+
 func TestUnlimitedRestartPolicyDoesNotPersistHistory(t *testing.T) {
 	slot := &swarmHealthSlotState{Slot: 1}
 	policy := swarmHealthRestartPolicy{Condition: "any", MaxAttempts: 0}
