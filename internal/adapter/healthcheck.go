@@ -40,16 +40,10 @@ func validateHealthcheckForMonitor(hc *dockcontainer.HealthConfig) ([]string, er
 		return nil, nil
 	}
 
-	var warnings []string
 	if warning != "" {
-		warnings = append(warnings, warning)
+		return []string{warning}, nil
 	}
-	if healthcheckEnabled(hc) &&
-		(hc.Interval == 0 || hc.Timeout == 0 || hc.Retries == 0 || hc.StartPeriod == 0 || hc.StartInterval == 0) {
-		warnings = append(warnings,
-			"d2k cannot inherit image-specific HEALTHCHECK defaults; zero health timing/retry fields use Docker daemon defaults")
-	}
-	return warnings, nil
+	return nil, nil
 }
 
 func healthcheckEnabled(hc *dockcontainer.HealthConfig) bool {
