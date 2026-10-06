@@ -289,11 +289,14 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 		return pods[i].CreationTimestamp.Before(&pods[j].CreationTimestamp)
 	})
 	live := map[string]corev1.Pod{}
+	orderedUIDs := make([]string, 0, len(pods))
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
-		live[string(pod.UID)] = pod
+		uid := string(pod.UID)
+		live[uid] = pod
+		orderedUIDs = append(orderedUIDs, uid)
 	}
 
 	state, err := a.mutateSwarmHealthLifecycleState(ctx, deployment, func(state *swarmHealthLifecycleState) (bool, error) {
@@ -336,7 +339,8 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 		// Next adopt valid on-Pod slot labels when they do not conflict with
 		// persisted ownership. This survives d2k restarts before the ConfigMap
 		// state has been reconstructed.
-		for uid, pod := range live {
+		for _, uid := range orderedUIDs {
+			pod := live[uid]
 			if assigned[uid] != 0 {
 				continue
 			}
@@ -370,7 +374,7 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 		sort.Ints(pendingSlots)
 		for _, slotNumber := range pendingSlots {
 			var podUID string
-			for uid := range live {
+			for _, uid := range orderedUIDs {
 				if assigned[uid] == 0 {
 					podUID = uid
 					break
