@@ -225,7 +225,24 @@ func (a *KubernetesDockerAdapter) reconcileHealthMonitors(ctx context.Context) e
 		var lifecycle *swarmHealthLifecycleState
 		isSwarm := deployment.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue
 		if isSwarm {
-			lifecycle, _, _ = a.loadSwarmHealthLifecycleState(ctx, deployment)
+			if _, policyErr := decodeSwarmHealthRestartPolicyStrict(deployment.Annotations[types.AnnotationSwarmRestartPolicy]); policyErr != nil {
+				for _, pod := range pods.Items {
+					if pod.Status.Phase == corev1.PodRunning {
+						_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthMetadataInvalid", policyErr.Error())
+					}
+				}
+				continue
+			}
+			var lifecycleErr error
+			lifecycle, _, lifecycleErr = a.loadSwarmHealthLifecycleState(ctx, deployment)
+			if lifecycleErr != nil {
+				for _, pod := range pods.Items {
+					if pod.Status.Phase == corev1.PodRunning {
+						_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthStateInvalid", lifecycleErr.Error())
+					}
+				}
+				continue
+			}
 		}
 
 		for _, pod := range pods.Items {
