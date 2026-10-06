@@ -1473,9 +1473,57 @@ func (a *KubernetesDockerAdapter) SwarmInspectTask(ctx context.Context, id strin
 	if err != nil {
 		return nil, fmt.Errorf("unable to list pods: %w", err)
 	}
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unable to list deployments: %w", err)
+	}
+
+	depByName := map[string]appsv1.Deployment{}
+	stateByName := map[string]*swarmHealthLifecycleState{}
+	for _, dep := range deps.Items {
+		depByName[dep.Name] = dep
+		if state, stateErr := a.swarmLifecycleStateForDeployment(ctx, dep); stateErr == nil {
+			stateByName[dep.Name] = state
+		}
+	}
+
 	for _, p := range pods.Items {
-		if swarmID(string(p.UID)) == id || string(p.UID) == id || p.Name == id {
-			return kubePodToSwarmTask(p, "", "", 0, a.healthStateForPod(p)), nil
+		deploymentName := p.Labels[types.LabelSwarmService]
+		if deploymentName == "" {
+			deploymentName = p.Labels["app"]
+		}
+		taskID := ""
+		slotNumber := parseSwarmSlotLabel(p)
+		if state := stateByName[deploymentName]; state != nil {
+			if slot := state.slotForPodUID(string(p.UID)); slot != nil {
+				slotNumber = slot.Slot
+				taskID = slot.CurrentTaskID
+			}
+		}
+		if taskID == "" {
+			taskID = swarmID(string(p.UID))
+		}
+		if taskID == id || swarmID(string(p.UID)) == id || string(p.UID) == id || p.Name == id {
+			return kubePodToSwarmTask(p, "", "", slotNumber, a.healthStateForPod(p), taskID), nil
+		}
+	}
+
+	for depName, state := range stateByName {
+		_ = depByName[depName]
+		if state == nil {
+			continue
+		}
+		for _, slot := range state.Slots {
+			if slot == nil {
+				continue
+			}
+			for _, record := range slot.TaskHistory {
+				if record.ID == id || record.PodUID == id || record.PodName == id {
+					return lifecycleTaskToSwarmTask(record), nil
+				}
+			}
 		}
 	}
 	return nil, fmt.Errorf("task %q not found", id)
@@ -2357,7 +2405,7 @@ func swarmTargetContainerReady(p corev1.Pod) bool {
 	return ok && status.State.Running != nil && status.Ready
 }
 
-func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int, health *dockertypes.Health) map[string]any {
+func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int, health *dockertypes.Health, taskID string) map[string]any {
 	// Swarm health semantics belong to the service container, not arbitrary
 	// injected sidecars. A task with a translated health check stays "starting"
 	// until that target container is ready. Missing ContainerStatuses is also
@@ -2411,8 +2459,11 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 		}
 	}
 
+	if taskID == "" {
+		taskID = swarmID(string(p.UID))
+	}
 	return map[string]any{
-		"ID": swarmID(string(p.UID)),
+		"ID": taskID,
 		"Version": map[string]any{"Index": uint64(1)},
 		"CreatedAt": p.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"UpdatedAt": p.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
