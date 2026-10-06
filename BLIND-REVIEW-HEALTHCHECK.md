@@ -59,16 +59,16 @@
 
 This committed file is the authoritative remediation state for the blind-review findings.
 
-**Totals:** Open: **8** · In progress: **0** · Fixed: **11**
+**Totals:** Open: **0** · In progress: **1** · Fixed: **18**
 
 | Finding | Status | Work |
 |---|---|---|
 | HC-BR-001 | **FIXED** | Durable replacement intent is persisted and reconciled until convergence; transient readiness/delete/API failures retry instead of stranding the task. |
 | HC-BR-002 | **FIXED** | Monitor registrations carry unique tokens; stale teardown can remove only the exact registration it owns. |
 | HC-BR-003 | **FIXED** | Per-slot restart history is committed only after failed-task deletion is accepted; failed delete attempts do not consume MaxAttempts. |
-| HC-BR-004 | **OPEN** | Match Moby start-period boundary scheduling |
-| HC-BR-005 | **OPEN** | Separate health exec setup timeout from command timeout |
-| HC-BR-006 | **OPEN** | Docker-compatible output truncation marker |
+| HC-BR-004 | **FIXED** | Start-period scheduling now mirrors Moby: the full start interval selected after the prior probe is not clamped to the boundary. Regression: `TestDockerHealthStartPeriodUsesFullStartIntervalAcrossBoundary`. |
+| HC-BR-005 | **FIXED — bounded platform approximation** | client-go exposes no remote-process-start signal. d2k gives exec establishment a separate bounded allowance, documents the unavoidable timing approximation, and no longer claims byte-for-byte timeout timing parity. |
+| HC-BR-006 | **FIXED** | Health output preserves Docker’s 4096-byte buffer behavior and appends `...` when truncated. Boundary regressions cover 4095/4096/4097 bytes. |
 | HC-BR-007 | **FIXED** | Unlimited policies persist no restart history; bounded policies prune per window and store only required per-slot attempts. |
 | HC-BR-008 | **FIXED** | Restart accounting moved to persistent stable slot state, independently enforcing MaxAttempts/window for each replica slot. |
 | HC-BR-009 | **FIXED** | Stable slots persist in lifecycle state and Pod labels; initial assignment is deterministic and replacement inherits the failed slot without renumbering survivors. |
@@ -77,11 +77,11 @@ This committed file is the authoritative remediation state for the blind-review 
 | HC-BR-012 | **FIXED** | Corrupt lifecycle/restart-policy metadata surfaces as an error and marks health readiness false rather than falling back to permissive restart behavior. |
 | HC-BR-013 | **FIXED** | Namespace-scoped Kubernetes Lease enforces one active health manager; startup/renewal/replacement mutations verify ownership. |
 | HC-BR-014 | **FIXED** | Pod UID + container ID + monitor token fence state publication/readiness; stale cancelled monitor results cannot overwrite or replace a newer container generation. |
-| HC-BR-015 | **OPEN** | Image HEALTHCHECK inheritance/default merge |
-| HC-BR-016 | **OPEN** | API-version accessibility of StartInterval |
-| HC-BR-017 | **OPEN** | Docker-compatible timeout diagnostic |
-| HC-BR-018 | **OPEN** | Repository-wide gofmt cleanup |
-| HC-BR-019 | **OPEN** | PR multi-arch CI local-context fix |
+| HC-BR-015 | **FIXED — explicit compatibility boundary** | d2k cannot obtain OCI image config from the Kubernetes API. Standalone/Swarm create now explicitly warn when image HEALTHCHECK inheritance may be lost; empty Test warns too; README narrows claims and documents zero-field/image-SHELL limits. |
+| HC-BR-016 | **FIXED** | d2k now advertises Docker API 1.44 so negotiated clients can send StartInterval; `/version` and `/_ping` regressions assert 1.44. |
+| HC-BR-017 | **FIXED** | Timeout results synthesize Docker-compatible `Health check exceeded timeout (...)` output while retaining partial probe output. Regression covers the timeout path. |
+| HC-BR-018 | **FIXED** | Repository-wide gofmt is clean; exact-head feature validation enforces gofmt before build/test/vet. |
+| HC-BR-019 | **IN PROGRESS** | PR Docker build uses the checked-out workspace (`context: .`) instead of the synthetic remote pull ref. Final normal-PR multi-arch validation remains. |
 
 ### Remediation checkpoint — lifecycle redesign recovered
 
@@ -125,6 +125,22 @@ Functional lifecycle head `38cf8551548654b2cd53140101de0ceab073cedc` passed the 
 - go vet ./....
 
 Race and multi-architecture PR validation are intentionally deferred until the remaining Docker-semantic/CI findings are closed on one final head.
+
+### Docker-semantic remediation checkpoint
+
+Exact feature head `6e91cbb3155b6091f8a728eda53a48b8f26f8962` passed repository-wide gofmt, strict tidy, build, full tests, and vet in push validation run `37514983650`.
+
+This checkpoint validates:
+
+- Moby start-period/start-interval boundary behavior;
+- Docker truncation marker behavior;
+- Docker-compatible timeout diagnostic formatting;
+- direct-CMD literal argv preservation;
+- API 1.44 negotiation for StartInterval;
+- create-scoped warnings for unavailable image HEALTHCHECK inheritance in standalone and Swarm flows;
+- lifecycle redesign regression suite.
+
+HC-BR-005 and HC-BR-015 are closed using the alternatives explicitly allowed by the blind-review remediation text: client-go has no process-start event for exact Docker timeout accounting, and Kubernetes does not expose OCI image config for Docker-equivalent inheritance. Both limitations are now surfaced and narrowly documented instead of silently claiming parity.
 
 ### Remediation strategy
 
