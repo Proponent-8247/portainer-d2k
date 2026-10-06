@@ -38,7 +38,7 @@ rules:
   # Pods — for log streaming and exec
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "watch", "list", "delete"]
+    verbs: ["get", "watch", "list", "patch", "delete"]
   # pods/status — d2k owns a custom readiness-gate condition for Swarm healthchecks.
   - apiGroups: [""]
     resources: ["pods/status"]
@@ -59,6 +59,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Lease — enforces a single active Docker health manager per namespace.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
+
 
   # Secrets — used for swarm secrets
   - apiGroups: [""]
