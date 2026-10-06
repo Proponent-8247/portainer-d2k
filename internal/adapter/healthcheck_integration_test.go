@@ -474,11 +474,12 @@ func TestRenamedDeploymentUsesOriginalWorkloadIdentityForHealthRuntimeState(t *t
 
 	a := newHealthcheckTestAdapter()
 	a.client = fake.NewSimpleClientset(deployment, pod)
-	a.storeDockerHealthState(string(pod.UID), &dockerHealthState{
-		Health:    dockertypes.Health{Status: dockertypes.Healthy},
-		StartedAt: started.Time,
-		UpdatedAt: time.Now(),
-	})
+	a.healthStates[string(pod.UID)] = &dockerHealthState{
+		Health:      dockertypes.Health{Status: dockertypes.Healthy},
+		StartedAt:   started.Time,
+		UpdatedAt:   time.Now(),
+		ContainerID: "containerd://abc",
+	}
 
 	inspect, err := a.InspectContainer(ctx, "renamed")
 	if err != nil {
@@ -682,7 +683,7 @@ func TestKubePodToSwarmTaskReportsUnhealthyMonitorStateFailed(t *testing.T) {
 	task := kubePodToSwarmTask(pod, "svc", "node", 1, &dockertypes.Health{
 		Status:        dockertypes.Unhealthy,
 		FailingStreak: 3,
-	})
+	}, "")
 	status := task["Status"].(map[string]any)
 	if status["State"] != "failed" {
 		t.Fatalf("unhealthy Swarm health state = %#v, want failed", status)
