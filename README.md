@@ -124,22 +124,55 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 d2k runs explicit Docker health checks supplied through `docker run`, `docker service`, or Compose/stack service specifications with a d2k-owned monitor rather than Kubernetes liveness/readiness exec probes. This keeps Docker's health state machine authoritative instead of inferring Docker health from kubelet readiness.
 
-- `CMD` health checks are executed directly in the target container with the supplied argv preserved literally. In particular, Kubernetes-style `$(VAR)` expansion is not applied.
+- `CMD` health checks are executed directly in the target container with the supplied argv preserved literally. Kubernetes-style `$(VAR)` expansion is not applied.
 - `CMD-SHELL` health checks run through `/bin/sh -c`. Docker can use image-specific `SHELL` metadata; d2k does not inspect image metadata, so non-default image shell behavior is not reproduced.
-- `NONE` disables health monitoring. Unknown raw API test discriminators are retained for inspect/readback but do not start a monitor, matching Docker's no-monitor behavior.
-- Docker's `interval`, `timeout`, `retries`, `start_period`, and `start_interval` behavior is maintained by d2k. The normal interval is scheduled after each completed check; start-period failures do not advance the failing streak; the default start interval is 5 seconds.
-- Health-command process exit failures and pod-exec/infrastructure failures both count as failed Docker health results. d2k retains the last five results, including output (capped at 4096 bytes), timestamps, exit code, and exact failing streak for `docker inspect`.
-- Standalone containers expose Docker health state without using Kubernetes readiness to remove the container from network reachability.
-- Swarm VIP services receive a custom Pod readiness gate controlled by d2k. A task remains `starting` until its target container is healthy; an injected sidecar cannot make the service task healthy.
-- An unhealthy Swarm task is marked failed and removed from VIP service readiness. For health-triggered replacement, d2k honors restart condition (`none`, `on-failure`, `any`), delay, `MaxAttempts`, and restart window. Replacement is performed by deleting the failed Pod so the Deployment creates a new Pod/task identity.
-- `dnsrr` and `publish mode=host` are rejected when an active health check is configured. Kubernetes `hostPort` remains directly reachable regardless of Pod readiness, so accepting this combination would silently violate the health-routing contract.
-- The monitor reconciles live Pods continuously. A d2k process restart reconstructs monitors from Deployment annotations and running Pods; health status begins at `starting` again until the next check.
-- Kubernetes limits total object annotations to 256 KiB. d2k validates the encoded health metadata before creating/updating Kubernetes resources and rejects unrepresentable configurations as bad Docker input.
-- This feature does not add server-side `docker ps --filter health=...` filtering or synthesize Docker `health_status` events.
+- `NONE` disables health monitoring. Unknown raw API test discriminators are retained for inspect/readback but do not start a monitor.
+- Docker's normal interval is selected after each completed check. During the start period, d2k uses the full configured/default `start_interval` chosen at the end of the preceding check; it does not clamp a timer to the start-period boundary.
+- Process exit failures and pod-exec/infrastructure failures both count as failed Docker health results. The last five results retain timestamps, exit code, exact failing streak, and up to 4096 bytes of output; truncated output receives Docker's `...` marker.
+- Docker applies the configured health timeout only after its exec process reports started. Kubernetes Pod exec exposes no equivalent process-start signal. d2k therefore gives remote-exec establishment an independent 30-second budget plus the configured probe timeout. This avoids charging ordinary API/kubelet setup entirely against the Docker timeout, but command-runtime timing cannot be made byte-for-byte identical to dockerd when exec establishment is unusually slow.
+- Timeout health-log entries use Docker-compatible `Health check exceeded timeout (...)` diagnostics and retain captured output within the same truncation limit.
 
-Docker merges zero-valued health settings with image `HEALTHCHECK` metadata before daemon defaults are applied. d2k does not inspect container-image metadata. If a request only asks to inherit an image-defined health command, d2k returns a warning and does not invent one; when an explicit command is present but timing/retry values are zero, d2k uses Docker daemon defaults rather than unknown image-specific values.
+Standalone containers expose Docker health state without using Kubernetes readiness to remove the container from network reachability.
 
-d2k currently advertises Docker API 1.41. The Docker CLI gates `--health-start-interval` at API 1.44, so normally negotiated 1.41 CLI sessions do not send that flag even though raw API requests containing `StartInterval` are accepted.
+### Swarm health lifecycle
+
+Healthchecked replicated Swarm services use a d2k-owned persistent lifecycle model:
+
+- every replica receives a stable Swarm slot persisted in Kubernetes state and on the Pod;
+- surviving replicas are never renumbered when another task is replaced;
+- health-monitor ownership is fenced by Pod UID, container ID, and monitor generation so a cancelled/stale monitor cannot publish health or delete a restarted task;
+- one namespace-scoped Kubernetes Lease enforces a single active d2k health manager. Starting a second active d2k instance for the same namespace fails instead of creating split-brain probes/restarts;
+- unhealthy tasks are withdrawn from the custom readiness gate and shut down promptly;
+- replacement intent is persisted and reconciled until it converges, so transient status/delete/API failures do not strand the task;
+- restart condition, delay, `MaxAttempts`, and restart window are tracked per stable replica slot rather than per service;
+- a failed delete does not consume a restart attempt; bounded restart history is committed only after task shutdown is accepted;
+- unlimited restart policies do not accumulate unbounded restart-history metadata;
+- restart delay applies to replacement admission after the failed task has been shut down;
+- replacement tasks retain the failed task's slot but receive a distinct stable task ID;
+- replaced failed tasks remain visible through bounded Swarm task history (five per slot, matching d2k's advertised task-history retention);
+- corrupted internal restart/lifecycle metadata fails closed rather than silently selecting a more permissive policy;
+- service-spec generation changes reset old-spec restart accounting while retaining stable slot/task history.
+
+Healthchecked `dnsrr` and `publish mode=host` services are rejected before Kubernetes resources are mutated. Kubernetes `hostPort` remains reachable regardless of Pod readiness, so accepting that combination would violate Swarm's health-routing contract.
+
+The health manager continuously reconciles live Pods. d2k process restart reconstructs active monitors from Deployment/Pod state; current health starts at `starting` until a new check runs, while stable slots, restart accounting, pending replacement intent, and failed-task history survive in Kubernetes.
+
+### Image health metadata
+
+Docker normally merges image `HEALTHCHECK` metadata into an incomplete user health configuration. d2k does not have access to OCI image configuration metadata through the Kubernetes API:
+
+- if the request omits `Healthcheck`, d2k returns a warning that an image-defined health check cannot be inherited;
+- an explicitly empty health test also returns the image-inheritance warning;
+- with an explicit command, zero timing/retry fields use Docker daemon defaults rather than unknown image-specific values;
+- image-specific Docker `SHELL` metadata cannot be reproduced.
+
+These are explicit compatibility limits rather than silently claimed Docker parity.
+
+d2k advertises Docker API **1.44**, allowing normally negotiated Docker clients to send `StartInterval` / `--health-start-interval`.
+
+Kubernetes limits total object annotations to 256 KiB. d2k validates encoded health metadata before creating/updating Kubernetes resources and rejects unrepresentable configurations as bad Docker input.
+
+This feature does not add server-side `docker ps --filter health=...` filtering or synthesize Docker `health_status` events.
 
 ---
 
