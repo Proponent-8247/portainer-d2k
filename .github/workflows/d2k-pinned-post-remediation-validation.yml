@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout validation branch (pinned Go source)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
       - name: Setup Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
@@ -19,8 +21,8 @@ jobs:
           cache: true
       - name: Verify pinned source parent and clean Go files
         run: |
-          test "$(git rev-parse HEAD^)" = "96d3f9209ac48dacacb5dd8330e6d86129eb674c"
-          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/d2k-pinned-post-remediation-validation.yml"
+          git cat-file -e 96d3f9209ac48dacacb5dd8330e6d86129eb674c^{commit}
+          test "$(git diff --name-only 96d3f9209ac48dacacb5dd8330e6d86129eb674c HEAD)" = ".github/workflows/d2k-pinned-post-remediation-validation.yml"
       - name: gofmt -l .
         run: |
           gofmt -l . | tee /tmp/d2k-gofmt-list
@@ -43,10 +45,12 @@ jobs:
     steps:
       - name: Checkout validation branch (pinned Go source)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
       - name: Verify pinned source parent and clean Go files
         run: |
-          test "$(git rev-parse HEAD^)" = "96d3f9209ac48dacacb5dd8330e6d86129eb674c"
-          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/d2k-pinned-post-remediation-validation.yml"
+          git cat-file -e 96d3f9209ac48dacacb5dd8330e6d86129eb674c^{commit}
+          test "$(git diff --name-only 96d3f9209ac48dacacb5dd8330e6d86129eb674c HEAD)" = ".github/workflows/d2k-pinned-post-remediation-validation.yml"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
       - name: Set up Buildx
