@@ -1,6 +1,10 @@
 # Docker health checks — independent post-remediation review
 
-**Review status:** IN PROGRESS — blind phase. **Do not use prior audit, review, remediation history or discussions before findings are frozen.**
+**Review status:** COMPLETE — independent findings frozen, all validation gates passed, prior-ledger reconciliation completed. **Final verdict: NOT READY FOR UPSTREAM.**
+
+**Authoritative final summary:** pinned candidate `96d3f9209ac48dacacb5dd8330e6d86129eb674c`; 18 frozen independent findings (10 HIGH / 8 MEDIUM); one later classified as a documented acceptable approximation; all prescribed gofmt/tidy/build/test/vet/race and amd64+arm64 OCI gates passed via [run 37976451131](https://github.com/Proponent-8247/portainer-d2k/actions/runs/37976451131). Reconciliation and full supporting evidence appear at the end of this ledger. No product fixes made.
+
+**Historical checkpoints:** Earlier in-progress placeholders and interim assessments below document the review sequence; they do not supersede the final conclusion or final validation results.
 
 ## Immutable review target and verification (2026-10-09)
 
@@ -19,37 +23,37 @@ Independent from previous findings. No access to `AUDIT-HEALTHCHECK.md`, `BLIND-
 ## Scope and progress
 
 - [x] Pinned SHA/base/branch verification
-- [ ] Reconstruction of candidate lifecycle architecture from source
-- [ ] Docker health semantics and exec security
-- [ ] Health monitor ownership, concurrency, cancellation and cross-process Lease fencing
-- [ ] Persisted Swarm slots/task history/restart accounting and all replacement transitions
-- [ ] Standalone/list/inspect and Swarm Docker API paths
-- [ ] Routing, reachability and update atomicity
-- [ ] Kubernetes controller interaction, upgrade behavior and API 1.44 negotiation
-- [ ] Adversarial test coverage and explicit HIGH-risk race timelines
-- [ ] Freeze independent findings
-- [ ] Validation gates: gofmt, go mod tidy clean, build, test, vet, race, amd64/arm64 OCI
-- [ ] Prior-ledger reconciliation **only after freeze**
+- [x] Reconstruction of candidate lifecycle architecture from source
+- [x] Docker health semantics and exec security
+- [x] Health monitor ownership, concurrency, cancellation and cross-process Lease fencing
+- [x] Persisted Swarm slots/task history/restart accounting and all replacement transitions
+- [x] Standalone/list/inspect and Swarm Docker API paths
+- [x] Routing, reachability and update atomicity
+- [x] Kubernetes controller interaction, upgrade behavior and API 1.44 negotiation
+- [x] Adversarial test coverage and explicit HIGH-risk race timelines
+- [x] Freeze independent findings
+- [x] Validation gates: gofmt, go mod tidy clean, build, test, vet, race, amd64/arm64 OCI
+- [x] Prior-ledger reconciliation **only after freeze**
 
 ## Architectural reconstruction
 
-Pending source inspection.
+*Historical initialization checkpoint; the completed 17-point source reconstruction is recorded below.*
 
 ## Independent findings (append before freeze)
 
-Not yet assessed; zero findings logged **does not mean zero defects**.
+*Historical initialization checkpoint; the 18 frozen findings and final reconciliation appear below.*
 
 ## Validation
 
-Not yet executed. Static review and independent finding freeze must precede validation per review instructions.
+*Historical initialization checkpoint. All final CI gates passed after freeze; see validation results below.*
 
 ## Independent upstream submission verdict
 
-**NOT YET ASSESSED.**
+**NOT READY** — see pre-reconciliation independent verdict and final reconciled verdict below.
 
 ## Reconciliation with prior work (only after freeze)
 
-Strictly embargoed during blind phase.
+*Historical embargo checkpoint. No prior ledgers were opened until after freeze and successful CI validation; full reconciliation appears at the end.*
 
 
 ## Source-derived architectural reconstruction (partial, source-only)
