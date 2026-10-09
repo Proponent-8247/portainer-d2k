@@ -194,3 +194,59 @@ This is **not a completed review**. No full test suite, race validation, cross-a
 ## Not yet full proof
 
 Static source inspection demonstrates the listed paths. No concurrent live Kubernetes reproduction, full compilation, race test, or multi-arch OCI build was performed in this restart. Previous review files and remediation commit messages remain unread. Finding list is **not frozen**.
+
+## Additional findings — rollout, policy validation and API-state coherence
+
+### HC-PRR-013 — HIGH — Negative Swarm restart-policy fields are accepted, then prevent health-manager operation
+
+**Evidence:** `swarm.go:306-337` copies `Delay`, `MaxAttempts` and `Window` from the user-supplied Swarm ServiceSpec directly to the annotation without checking for negative values. `SwarmCreateService` and `applySwarmServiceUpdate` persist this policy. `health_manager.go:92-113` rejects negative values on decode, and `reconcileHealthMonitors:229-242` sets readiness false/does not monitor. Caller has already received a successful create/update response.
+
+**Impact:** an invalid policy produces a successful API response but a service that can remain permanently unroutable because its readiness gate never turns true.
+
+**Remediation/test:** validate normalized policy before any Kubernetes mutation; return a Docker-compatible bad-request response; test `Delay<0`, `Window<0`, `MaxAttempts<0` on create and update without side effects.
+
+### HC-PRR-014 — HIGH — Swarm restart delay gates readiness but does not delay application execution
+
+**Evidence:** `swarm_health_lifecycle.go:831-881` deletes the failed Pod and records `NotBefore` as an activation timestamp. Deployment/ReplicaSet creates and starts the replacement Pod immediately. `health_manager.go:429-438` and `swarm_health_lifecycle.go:740-756` only hold custom Pod readiness false before `NotBefore`. There is no mechanism to prevent the replacement application process from starting.
+
+**Impact:** a workload configured with a long Swarm restart delay may execute and produce side effects immediately, despite appearing unavailable via ClusterIP; it violates actual delayed *start* semantics and may defeat operational cooldown/backoff.
+
+**Remediation/test:** delay replacement Pod creation/start or explicitly decline to claim Swarm restart-delay equivalence; test that process execution itself cannot begin before delay elapses.
+
+### HC-PRR-015 — MEDIUM — Terminating Pods can still appear as RUNNING Swarm tasks
+
+**Evidence:** `swarm.go:2403-2485` converts Pod phase and health status to task state without inspecting `DeletionTimestamp`. `SwarmListTasks:1358-1397` maps labeled Pods into slots without filtering terminating Pods, so a healthy-but-terminating Pod can continue to be exposed as a live running task.
+
+**Impact:** task list/inspect may report stale running instances during scale-down, update and deletion, distorting service-convergence decisions.
+
+**Remediation/test:** include deletion/desired-state transition in task conversion; test Pod Running with DeletionTimestamp and previously healthy readiness.
+
+### HC-PRR-016 — MEDIUM — Concurrent StartHealthManager invocations can start two manager loops in one adapter
+
+**Evidence:** `health_manager.go:124-151` checks `healthCancel` under mutex, unlocks, calls `acquireHealthManagerLease`, then locks again to store `healthCancel` and launch goroutines. Two callers can both observe nil; because they share `healthLeaseID`, Lease acquisition with the same holder identity may succeed for both. There is no second guard before launching goroutines.
+
+**Impact:** duplicate reconcile/lease-renewal loops within one process despite single-manager intention. Current `cmd/d2k.go` invokes this only once, so impact depends on library/test concurrency or future lifecycle control.
+
+**Remediation/test:** serialize start across Lease acquisition and goroutine activation using explicit state; concurrent-start unit/race test.
+
+### HC-PRR-017 — HIGH — Default rolling update can strand real Pods above the desired Swarm slot range
+
+**Evidence:** `swarm.go:687-707` defaults Swarm-backed Deployments to RollingUpdate with `MaxSurge=1`. `swarm_health_lifecycle.go:413-455` gives unassigned surge Pods new slots above desired count and explicitly never renumbers surviving Pods. `SwarmListTasks:1360-1425` returns tasks only for slots `1..max(status.replicas,spec.replicas)`.
+
+**Deterministic timeline:** a one-replica service starts with old Pod in slot 1; during image rolling update the new surge Pod appears while old is still present and gets slot 2; Kubernetes deletes old Pod, leaving the new running Pod permanently in slot 2; Deployment desired/status settle to one replica; task API reports synthetic `preparing` slot 1 and omits the actual healthy slot-2 Pod. No future unassigned Pod exists to correct the mapping.
+
+**Impact:** ordinary image updates can make `docker service ps`, task inspect and Docker CLI convergence incorrect permanently, even while the new workload is running.
+
+**Remediation/test:** bind rollout successors to retired old slots based on Deployment/ReplicaSet rollout generation and enforce valid active slot range, potentially via an explicit rollout state machine; test 1->1 and 2->2 image updates with MaxSurge=1 and overlap.
+
+### HC-PRR-018 — MEDIUM — PodRunning with a crashed target container may stay reported as STARTING indefinitely
+
+**Evidence:** `swarm.go:2410-2455` reports `starting` when target container is not Running even if Pod phase is Running because an injected sidecar remains alive. `health_manager.go:249-258` does not start or continue probes when target container is absent or waiting. No failed-task history/replacement transition is triggered for such a target crash.
+
+**Impact:** target CrashLoopBackOff/Terminated while sidecar runs can produce misleading perpetual task-starting behavior; Kubelet restarts bypass Swarm policy accounting.
+
+**Remediation/test:** model actual target container lifecycle and distinguish waiting/restarting from terminal failure, including sidecar-present test and simulated kubelet restart.
+
+## Coverage checkpoint
+
+Source inspections: full `health_manager.go`, `health_lease.go`, `healthcheck.go`, `swarm_health_lifecycle.go`, relevant `swarm.go`, `container.go`, `exec.go`, Docker API handlers, `cmd/d2k.go`, deployment RBAC, Docker API version, CI workflow, relevant test suites, and baseline Moby v27.3.1/SwarmKit health/restart logic. Ancillary small changed files were compared against upstream; changes in events/helpers/metrics/volume/exec/images/networks/middleware were predominantly gofmt/import-order and not a source of identified behavior change. Remaining: validation availability, fixed finding list/independent verdict, and prior-ledger reconciliation after freeze.
