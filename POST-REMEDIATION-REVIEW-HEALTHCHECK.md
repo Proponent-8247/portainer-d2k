@@ -250,3 +250,65 @@ Static source inspection demonstrates the listed paths. No concurrent live Kuber
 ## Coverage checkpoint
 
 Source inspections: full `health_manager.go`, `health_lease.go`, `healthcheck.go`, `swarm_health_lifecycle.go`, relevant `swarm.go`, `container.go`, `exec.go`, Docker API handlers, `cmd/d2k.go`, deployment RBAC, Docker API version, CI workflow, relevant test suites, and baseline Moby v27.3.1/SwarmKit health/restart logic. Ancillary small changed files were compared against upstream; changes in events/helpers/metrics/volume/exec/images/networks/middleware were predominantly gofmt/import-order and not a source of identified behavior change. Remaining: validation availability, fixed finding list/independent verdict, and prior-ledger reconciliation after freeze.
+
+---
+
+# Independent findings frozen — 2026-10-09
+
+**Immutable code snapshot:** `96d3f9209ac48dacacb5dd8330e6d86129eb674c`. **Comparison:** `2508dde0d06476029be6aaee999b01c8262b6cc0` (upstream `portainer/d2k:develop`). The restarted static finding set `HC-PRR-001` through `HC-PRR-018` is hereby **FROZEN**. Preserve the original text above verbatim during reconciliation; later notes must be appended separately. Prior audit and remediation ledgers have not been consulted at the time of this freeze. Important caveat: the restart was performed within the same conversation that contained the first four provisional findings; perfect cognitive isolation from the earlier provisional review is therefore impossible, despite independent re-verification from source.
+
+## Frozen count / severity
+
+| Severity | Count | IDs |
+|---|---:|---|
+| CRITICAL | 0 | — |
+| HIGH | 10 | 001, 002, 003, 005, 007, 008, 009, 013, 014, 017 |
+| MEDIUM | 8 | 004, 006, 010, 011, 012, 015, 016, 018 |
+| LOW | 0 | — |
+| INFO | 0 | — |
+
+**Independent verdict before prior-ledger reconciliation: NOT READY FOR UPSTREAM SUBMISSION.** In particular, `HC-PRR-017` exposes a default normal-rollout slot hole that can make ordinary updates permanently invisible to Swarm clients, and `HC-PRR-005` exposes crash/recovery state inconsistency. Green compilation or unit tests would not prove either path safe.
+
+## Complete architectural reconstruction — seventeen required questions
+
+1. **Input:** Docker container create JSON `Healthcheck` and Swarm `TaskTemplate.ContainerSpec.Healthcheck`, decoded in corresponding API handlers and adapter.
+2. **Persistence:** Deployment metadata `d2k.portainer.io/healthcheck` annotation; lifecycle ConfigMap for service state.
+3. **Monitor creation:** periodic one-second reconciler lists managed Deployments and their Running Pods, finds workload container state and starts monitor goroutines.
+4. **Monitor ownership:** in-process `healthMonitors`, `healthCurrent`, registration tokens under mutex; cross-process namespace Lease.
+5. **Pod/container fences:** Pod UID + container ID in monitor key, token checks around health-state writes; Pod UID checked before readiness helper call but not inside downstream name-only status updater.
+6. **Publication:** in-memory Docker Health object with status, streak, last-five logs, exposed via list/inspect paths. No persisted probe results across d2k process restart.
+7. **Standalone versus Swarm:** standalone retains Docker-style reachability and no automatic health-triggered restart; Swarm gates Pod readiness and initiates Pod deletion and task replacement.
+8. **Stable slots:** ConfigMap `Slots` and Pod slot label; preferred remembered Pod UID, existing label, committed-pending replacement, next vacant slot; deployment deletion-cost annotation biases scale down.
+9. **Failed history:** per-slot last-five `TaskHistory` records in ConfigMap, synthesized into Swarm list/inspect.
+10. **Restart attempts/window:** per-slot timestamp list, pruned for positive Window, counted when delete commit recorded, no history for unlimited attempts.
+11. **Unhealthy replacement trigger:** monitor sets health `unhealthy`, shuts down probes for Swarm task; lifecycle reconciler marks Pod unready and creates Pending intent after policy checks.
+12. **Durable intent:** persisted `Pending` contains failed Pod UID/task/container, replacement task ID, policy, failure timestamp, delete-commit and NotBefore.
+13. **Restart delay:** `ActivationNotBefore` suppresses readiness; underlying replacement process can start early (finding 014).
+14. **Convergence:** controller creates successor Pod; slot assigner claims new unassigned Pod for committed pending slot, replaces task ID, clears Pending.
+15. **Single-owner election:** Kubernetes coordination Lease `d2k-health-manager` per namespace acquired before HTTP server startup; renew interval 5 seconds, duration 15 seconds.
+16. **Handoff/loss:** lease GET/update with optimistic conflicts; renewal failure eventually cancels manager; no self-healing reacquisition; release name-only GET then DELETE (findings 003, 004, 007).
+17. **Cleanup:** stale in-memory health states removed after monitor desired-set reconciliation; lifecycle orphan ConfigMaps removed on service absence; per-slot history remains for scaled-down slots (finding 011).
+
+## Adversarial test gaps not exercised by candidate
+
+- Multiple concurrent replacement slots; Kubernetes Pod arrival order and equal timestamps.
+- Crash after successful Pod DELETE but before persisted delete commit; success-with-client-timeout ambiguity.
+- Default RollingUpdate `MaxSurge=1` with one replica and two replicas; old/new ReplicaSet coexistence.
+- Lease handoff race between holder GET and DELETE; stale owner updates Pod readiness after successor acquisition.
+- d2k outage >=15s followed by Kubernetes recovery; automatic manager re-election and probe reactivation.
+- Same-named service recreated while old ReplicaSet/Pods still present.
+- Health annotation corruption after gate became healthy; corrupted restart-policy annotation.
+- Negative Swarm restart-policy fields; atomic create/update bad-request rejection.
+- Running application vs configured Swarm RestartPolicy.Delay; not just Pod ready condition.
+- Container restarts inside same Pod and process crashes with sidecar still Running.
+- Long-running exec that starts immediately with short Docker health timeout.
+- Task list/inspect ServiceID, NodeID, terminating task state and history consistency.
+- Service scale churn and aggregate ConfigMap growth.
+- Cluster-level integration with real Kubernetes controllers and EndpointSlice data plane.
+- End-to-end Docker API 1.44 client compatibility beyond two version/ping shape unit tests.
+
+## Validation handoff
+
+Local Git checkout cannot resolve `github.com` from the container (DNS failure), and the GitHub connector is primarily a repository source/write interface. Repository-wide `gofmt -l .`, clean `go mod tidy`, `go build ./...`, `go test ./...`, `go vet ./...`, `go test -race ./...`, and amd64/arm64 OCI validation have **not** been run on this pinned candidate as part of the restarted review. Attempt a non-product, isolated validation workflow if permitted; otherwise retain **BLOCKED / NOT VERIFIED** for each gate, not PASS.
+
+**Embargo released only after this commit is durable.** Prior ledgers may be consulted only for reconciliation after validation status has been recorded. Neither source code nor tests were modified in the feature candidate.
