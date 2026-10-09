@@ -343,3 +343,55 @@ The initial test workflow [run 37976378393](https://github.com/Proponent-8247/po
 **Independent upstream verdict before reading older reviews: NOT READY.** Successful Go validation and multiarch builds do not exercise the deterministic one-replica rolling-update slot orphan (HC-PRR-017), crash between Pod DELETE and ConfigMap commit (HC-PRR-005), or cross-owner lease mutation (HC-PRR-003). All frozen findings remain open pending reconciliation.
 
 **Independent phase ended here.** Prior-ledger reconciliation may now begin. The original 18 findings will remain unchanged; any corrections, classification and final conclusion must be separately appended.
+
+---
+
+# Post-freeze reconciliation against earlier audits and remediation
+
+**Reconciliation opened only after:** independent findings `HC-PRR-001..018` were frozen in commit `3e1d514c92c52d3a07f8f50cd39541b7c5999ecb`, and final independent validation + verdict were committed in `04b8bc8f7b3c4789521cb577bbcac349a2b5c962`.
+
+Reviewed the two prior ledgers `AUDIT-HEALTHCHECK.md` (11 original audit findings) and `BLIND-REVIEW-HEALTHCHECK.md` (19 blind-review findings marked fixed) **only now**. Compared remediation ledger claims to pinned post-remediation source, Docker/Moby 27.3.1 and SwarmKit. Also checked select original upstream-base source paths to distinguish pre-existing quirks from remediation-introduced regressions. The original independent finding texts remain unmodified.
+
+## Finding-by-finding reconciliation (exact IDs preserved)
+
+| Independent finding | Classification | Earlier relationship and reconciliation |
+|---|---|---|
+| **HC-PRR-001 (H)** | **Prior issue incompletely remediated** | HC-BR-014 promised Pod UID/container fencing and HC-BR-001 durable safe replacement. New name-only `setPodHealthCondition` and `Pods.Delete` allow a stale generation to mutate a replacement of the same Pod name. Requires UID preconditions; this is a narrowly timed race, not proven in live Kubernetes. |
+| **HC-PRR-002 (H)** | **Prior issue incompletely remediated** | HC-BR-009 promised stable slots and replacement inheritance. Persisted slots fixed the one-replacement case, but concurrent pending slots still greedily bind arbitrary newly created Pods without verified lineage. |
+| **HC-PRR-003 (H)** | **Regression introduced by remediation** | HC-BR-013 introduced the Lease to stop split-brain. `releaseHealthManagerLease` GET-then-name-only-DELETE now creates a takeover race and can delete the successor Lease; this code did not exist on upstream base. |
+| **HC-PRR-004 (M)** | **Prior issue incompletely remediated** | HC-BR-013 promised exclusive management and fenced mutations. Definitive ownership mismatch does not immediately cancel the old manager; readiness paths do not all recheck Lease ownership. |
+| **HC-PRR-005 (H)** | **Prior issue incompletely remediated** | HC-BR-001/003/009's durable replacement model does not close the crash-after-delete-before-persist hole; pending intent and the new replacement's actual slot ownership can diverge permanently. |
+| **HC-PRR-006 (M)** | **Independently rediscovered — explicitly accepted compatibility limitation** | Exactly the bounded remote-exec setup-vs-command timeout approximation from HC-BR-005. README already documents lack of process-start signal and total-budget compromise. **Not an undisclosed regression or independently a new upstream blocker**, provided claims stay accurate. Frozen text retained. |
+| **HC-PRR-007 (H)** | **Regression introduced by remediation** | New HC-BR-013 Lease loop cancels health management after renewal expiration but never re-elects/restarts, while HTTP serving continues. Lease-based health lifecycle needs a recovery state machine or process failure. |
+| **HC-PRR-008 (H)** | **Prior issue incompletely remediated** | HC-BR-012 fixed fail-closed handling for corrupt lifecycle/restart-policy JSON. Corrupt **Healthcheck** annotation is treated like disabled health instead, leaving an existing true readiness condition untouched. |
+| **HC-PRR-009 (H)** | **Genuinely new finding — pre-existing selector flaw amplified** | Original upstream list paths also match Pods by `app`/d2k labels without owner chain verification; post-remediation per-service lifecycle state now treats an old Pod as owning a new service slot after same-name recreate. Root selector weakness predates remediation; severity increases under persisted identity. |
+| **HC-PRR-010 (M)** | **Genuinely new finding — pre-existing API inconsistency** | Original upstream `SwarmInspectTask` already calls the converter with empty ServiceID/NodeID, unlike task list. HC-BR-010 expanded historical inspect but did not correct live inspect. **Do not label as remediation regression.** |
+| **HC-PRR-011 (M)** | **Prior issue incompletely remediated; scope qualified** | HC-BR-010 bounds *per-slot* task history at five, but empty retired high-numbered slots are retained when history remains. Growth is bounded by the historical maximum slot number and the per-slot limits if peak replica count stays fixed. The original text's suggestion that identical repeated scale cycles alone grow slot count indefinitely is overstated. Large/high-water scaling still risks ConfigMap limits; reassess as a scalability/retention issue, not an immediate unbounded leak at a fixed high-water mark. |
+| **HC-PRR-012 (M)** | **Genuinely new lifecycle-fidelity gap** | HC-BR-014 handled same-Pod monitor *fencing*, not how Kubelet-initiated target restarts should produce Swarm task generations / restart budgets. The underlying Deployment `RestartPolicyAlways` abstraction also predates health remediation. |
+| **HC-PRR-013 (H)** | **Prior issue incompletely remediated** | HC-BR-012 strictly rejects corrupt persisted restart policy but `normalizeSwarmHealthRestartPolicy` accepts negative user-supplied fields, then persists an annotation the strict decoder rejects after successful API response. Invalid user input path missing pre-mutation validation. |
+| **HC-PRR-014 (H)** | **Prior issue incompletely remediated; declared approximation** | HC-BR-011 fixed delaying *old-Pod deletion*, but new strategy applies `Delay` to readiness/admission, not process startup. The README says “replacement admission,” so that approximation is somewhat disclosed; it still diverges materially from real SwarmKit start-delay semantics and must be consciously accepted/limited or fixed before claiming restart-policy parity. |
+| **HC-PRR-015 (M)** | **Genuinely new finding — pre-existing task converter gap** | Upstream-base Pod-to-task conversion ignored `DeletionTimestamp`; its task reporting could stay RUNNING during termination. Not evidence of regression from the health change. |
+| **HC-PRR-016 (M)** | **Regression introduced by remediation** | HC-BR-013 added `StartHealthManager`; unlock-acquire-relock allows two concurrent callers of the same adapter to start duplicate manager loops sharing the same Lease identity. Normal executable calls Start once, so this is currently a lower-likelihood concurrency hazard. |
+| **HC-PRR-017 (H)** | **Regression introduced by remediation — key upstream blocker** | HC-BR-009 replaced age-reconstructed task slots with persistent “never renumber survivors” slots but did not integrate the unchanged default Kubernetes `MaxSurge=1` rollout. A one-replica 1→1 rollout can strand the new Pod permanently in slot 2 while task list displays only synthetic slot 1. This did **not** happen with original recompute-by-age numbering, though that original strategy broke other slot invariants. |
+| **HC-PRR-018 (M)** | **Prior issue incompletely remediated** | HC-AUD-004/HC-BR-014 improved target-container state and stale-monitor fencing. Sidecar-alive/target-crashloop handling still reports indefinite STARTING without Swarm task-level restart transition. Kubelet `Always` restarts bypass Swarm budgets. |
+
+**Classification totals (frozen 18):**
+- Prior issue incompletely remediated: **9** (`001,002,004,005,008,011,013,014,018`).
+- Regression introduced by remediation: **4** (`003,007,016,017`).
+- Genuinely new, including confirmed pre-existing issues not recorded by earlier audits: **4** (`009,010,012,015`).
+- Independently rediscovered/documented and accepted compatibility limit: **1** (`006`).
+- False positive after reconciliation: **0 definitively**. Qualification: `011`'s claimed unbounded same-size churn is not established; live reproduction is still required for several races.
+
+**Frozen severity counts remain** 0 CRITICAL / **10 HIGH** / **8 MEDIUM** / 0 LOW / 0 INFO, because source-derived frozen findings are immutable. In the **post-reconciliation triage**, HC-PRR-006 is a disclosed accepted approximation rather than a remediation blocker; HC-PRR-011's likelihood/growth description is narrowed. Treating all 18 as newly introduced defects would be wrong: several are upstream baseline gaps.
+
+## Coherence verdict
+
+The remediation substantially improved important invariants: monitor tokens, state and Pod UID/container-ID keys, durable per-slot history, consistent no-health standalone behavior, docker-compatible result logs, per-slot MaxAttempts and corruption checks. However, **the full cross-component lifecycle is not coherent under common rolling updates, process crashes, leadership changes and selected invalid-input paths**. Critical invariants are enforced locally, but the boundary between Controller-owned Pod creation and d2k-owned task slots is not causally fenced. The same is true of the Lease ownership handoff and the Pod DELETE/ConfigMap-commit boundary.
+
+The most decisive **upstream blockers** are HC-PRR-017 (ordinary rollout slots), HC-PRR-005 (crash convergence), HC-PRR-003/007 (lease ownership and health-manager liveness), HC-PRR-002 (concurrent replacements), HC-PRR-008/013 (fail-closed/validation gaps). HC-PRR-001 and HC-PRR-009 warrant UID/lineage fencing. HC-PRR-006 can remain a precisely described interoperability limitation rather than requiring strict Moby parity.
+
+## Tests and validation final state
+
+All prescribed static Go gates and dual-architecture OCI build **PASSED** on unchanged pinned candidate source through [validation run 37976451131](https://github.com/Proponent-8247/portainer-d2k/actions/runs/37976451131). These are repository build/unit/race gates, not live-controller or fault-injection proof. No test failures were observed and thus no validation-generated HC-PRR finding was needed. No integration suite in the pinned source demonstrates the failure-injection interleavings or the standard one-replica MaxSurge rollout; that remains the decisive missing evidence.
+
+**Final recommendation: NOT READY for submission to `portainer/d2k`.** Do not apply fixes as part of this review. Implement separately with one conceptual fix per commit and deterministic Pod/Lease/controller fault-injection tests, then commission another independent review of the corrected SHA. Never rewrite published branch history.
