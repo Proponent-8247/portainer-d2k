@@ -312,3 +312,14 @@ Source inspections: full `health_manager.go`, `health_lease.go`, `healthcheck.go
 Local Git checkout cannot resolve `github.com` from the container (DNS failure), and the GitHub connector is primarily a repository source/write interface. Repository-wide `gofmt -l .`, clean `go mod tidy`, `go build ./...`, `go test ./...`, `go vet ./...`, `go test -race ./...`, and amd64/arm64 OCI validation have **not** been run on this pinned candidate as part of the restarted review. Attempt a non-product, isolated validation workflow if permitted; otherwise retain **BLOCKED / NOT VERIFIED** for each gate, not PASS.
 
 **Embargo released only after this commit is durable.** Prior ledgers may be consulted only for reconciliation after validation status has been recorded. Neither source code nor tests were modified in the feature candidate.
+
+## Executable validation checkpoint — isolated GitHub Actions
+
+- Local container DNS cannot resolve `github.com`; no local clone.
+- Created validation-only branch `review/pinned-health-validation-96d3f92` directly from pinned candidate `96d3f9209ac48dacacb5dd8330e6d86129eb674c`. It adds only a GitHub Actions YAML; **no Go source/tests modified**.
+- First attempt [run 37976378393](https://github.com/Proponent-8247/portainer-d2k/actions/runs/37976378393) failed before checks because checkout depth 1 made `HEAD^` unavailable. Harness-only issue, **not a product defect**.
+- Fixed the validation harness without rewriting its branch history. New [run 37976451131](https://github.com/Proponent-8247/portainer-d2k/actions/runs/37976451131) at validation-only SHA `25f5fce00b4f7cb7f4ea1d81e586d22b3db1b4f3`.
+- GitHub Action provenance step passed: full history, pinned candidate exists, `git diff --name-only <pinned> HEAD` contains **only** `.github/workflows/d2k-pinned-post-remediation-validation.yml`.
+- Validated completed gates as of this checkpoint: repository-wide `gofmt -l .` **PASS**, `go mod tidy` clean diff **PASS**.
+- Go build, unit test, vet, race test, amd64+arm64 OCI build were **IN PROGRESS** at this checkpoint; do not claim PASS until run finalizes.
+- Prior ledgers remain unread while validation is still running.
