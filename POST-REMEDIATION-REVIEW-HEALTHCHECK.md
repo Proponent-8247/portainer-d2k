@@ -323,3 +323,23 @@ Local Git checkout cannot resolve `github.com` from the container (DNS failure),
 - Validated completed gates as of this checkpoint: repository-wide `gofmt -l .` **PASS**, `go mod tidy` clean diff **PASS**.
 - Go build, unit test, vet, race test, amd64+arm64 OCI build were **IN PROGRESS** at this checkpoint; do not claim PASS until run finalizes.
 - Prior ledgers remain unread while validation is still running.
+
+## Final independent validation results — before prior-ledger reconciliation
+
+The isolated pinned-source workflow [run 37976451131](https://github.com/Proponent-8247/portainer-d2k/actions/runs/37976451131) completed successfully: both `go-gates` job 113975862701 and `multiarch-oci` job 113975862211 ended `success`. The full-history provenance gate proved the only diff from candidate `96d3f9209ac48dacacb5dd8330e6d86129eb674c` was a temporary CI workflow YAML on the separate validation branch. There were **no product-code or test changes** and no registry push.
+
+| Gate | Result |
+|---|---|
+| `gofmt -l .` across repository | **PASS**, no unformatted files |
+| `go mod tidy` and clean `git diff --exit-code -- go.mod go.sum` | **PASS** |
+| `go build ./...` | **PASS** |
+| `go test ./...` | **PASS** |
+| `go vet ./...` | **PASS** |
+| `go test -race ./...` | **PASS** |
+| Docker Buildx multi-platform `linux/amd64,linux/arm64` OCI build/export | **PASS**, nonempty OCI output confirmed |
+
+The initial test workflow [run 37976378393](https://github.com/Proponent-8247/portainer-d2k/actions/runs/37976378393) failed its self-check due shallow Git checkout. This was corrected within the disposable validation-only workflow, after which all gates passed. It does **not** indicate a product defect.
+
+**Independent upstream verdict before reading older reviews: NOT READY.** Successful Go validation and multiarch builds do not exercise the deterministic one-replica rolling-update slot orphan (HC-PRR-017), crash between Pod DELETE and ConfigMap commit (HC-PRR-005), or cross-owner lease mutation (HC-PRR-003). All frozen findings remain open pending reconciliation.
+
+**Independent phase ended here.** Prior-ledger reconciliation may now begin. The original 18 findings will remain unchanged; any corrections, classification and final conclusion must be separately appended.
