@@ -93,3 +93,104 @@ At the pinned candidate, `health_manager.go` acquires a namespace Lease at start
 ## Further work
 
 This is **not a completed review**. No full test suite, race validation, cross-architecture image build, API contract review, or prior-ledger reconciliation has been performed. Findings are source-derived, not reproduced via live Kubernetes. Do not freeze the list until all required subsystems are reviewed.
+
+---
+
+# Restarted independent source pass — 2026-10-09
+
+**Restart scope:** Complete fresh source inspection at immutable candidate `96d3f9209ac48dacacb5dd8330e6d86129eb674c`; source tree and upstream base verified again. Feature-branch HEAD at restart was `2c3634e68e5b376e1e0dcee19633eb61bf55efc5` (review-ledger updates after candidate); upstream `portainer/d2k:develop` remained `2508dde0d06476029be6aaee999b01c8262b6cc0`. Compare candidate against base still reports `ahead=148`, `behind=0`, merge-base equal to base. Do not mistake documentation-only commits on branch HEAD for modifications to pinned code.
+
+## Source reconstruction (expanded)
+
+- `cmd/d2k.go` starts health manager before HTTP server begins; startup fails if another process holds the namespace Lease.
+- `healthcheck.go` stores Docker HealthConfig JSON as Deployment annotations, validates durations/command shape; `NONE` disables translation; image HEALTHCHECK inheritance is not implemented and create emits explicit warnings.
+- `health_manager.go` periodically reconciles d2k-managed Deployments; it discovers target container status by name, keys monitors by Pod UID + container ID, and fences state publication through registration token and container ID. Memory holds starting/healthy/unhealthy, failing streak and last-five probe records. Health is non-durable across process restart.
+- Swarm readiness uses custom Pod readiness gate `d2k.portainer.io/health-ready`; standalone Docker health does not gate endpoints, and standalone Services set `PublishNotReadyAddresses`. `Pods/exec` runs health commands in the named workload container through Kubernetes SPDY.
+- `health_lease.go`: namespaced `d2k-health-manager` Lease, 15-second duration and 5-second renewal; failed renewal cancels manager only after 15 seconds since last success; lease release GETs and DELETEs by name.
+- `swarm_health_lifecycle.go`: one ConfigMap per Swarm service-name hash, schema version 1; tracks Deployment UID/generation, per-slot Pod/container/task identity, max-attempt restart timestamps, 5-task/slot history and durable Pending replacement intent. Slot IDs are assigned by surviving stored UID, existing Pod label, pending committed replacement, then the next lowest vacant slot.
+- Unhealthy Swarm monitor records health and marks Pod unready. The reconciler persists intent, deletes the Pod, records delete commitment + restart history + failed task, then binds a new Pod to its old slot, preserving a preassigned replacement task ID and delayed readiness.
+- `swarm.go` creates/updates service Deployments, DNS/LoadBalancer Services, sets readiness gates, and synthesizes Swarm task readback from current Pods plus ConfigMap history. Pod execution and target status are matched by container name to avoid sidecar-first errors.
+- Docker Engine 27.3.1 `daemon/health.go` and upstream SwarmKit restart supervisor were inspected independently to check defaults, execution timing, output truncation, failure-streak semantics and per-slot restart accounting.
+
+**High-risk event timelines checked:**
+1. replacement DELETE success -> process crash before ConfigMap commit -> new Kubernetes replacement Pod exists -> slot reassignment runs before pending intent advancement;
+2. Lease holder A reads itself as owner -> B takes over -> A deletes Lease by name;
+3. monitor A verifies Pod UID/container ID -> old Pod disappears -> new Pod with reused name appears -> downstream name-only UpdateStatus operates on new Pod;
+4. renewal loop observes identity mismatch but leaves context live until timeout, allowing stale monitor-side activity.
+
+## Further findings from restarted source inspection
+
+### HC-PRR-005 — HIGH — Crash-after-delete before intent commit can permanently poison replacement slot
+
+**Evidence:** `internal/adapter/swarm_health_lifecycle.go:306-319,377-455,815-882`. If the failed Pod has vanished but `slot.Pending.DeleteCommittedAt == 0`, `ensureSwarmSlotAssignments` removes the old current UID but does not reserve the empty slot during `nextVacant()`. If a new Pod has already arrived, the unassigned-Pod fallback adopts it into the same slot with `swarmID(newPodUID)`; `Pending` remains. When `advancePendingSwarmReplacement` subsequently marks the deletion committed, it does not clear `CurrentPodUID` because that UID is no longer the failed UID. Later reconciliation sees a nonempty current slot and cannot clear the pending intent. New unhealthy instances cannot create a new intent.
+
+**Impact:** stuck pending lifecycle, incorrect replacement task identity, suppressed future restarts and incorrect task history across the crash boundary.
+
+**Remediation/test:** reserve every pending slot whether delete committed or not; reconcile old intent before adopting successor; atomically adopt with preassigned task ID once delete is durably recorded; inject process crash after successful API deletion and before ConfigMap write with replacement already visible.
+
+### HC-PRR-006 — MEDIUM — Probe timeout is not enforced from process start
+
+**Evidence:** `health_manager.go:503-561` passes one `context.WithTimeout(ctx, setupBudget + probeTimeout)` to `execInPod` and does not know when remote command starts. With a 3-second Docker Timeout and normal immediate start, a hanging command can run for up to 33 seconds. Moby v27.3.1 `daemon/health.go:111-156` starts separate 30-second setup and then configured command timeout after a process-start notification.
+
+**Impact:** delayed health-failure detection and delayed Swarm replacement by up to the setup allowance.
+
+**Remediation/test:** implement a start-boundary indication if practical, or document and bound timing difference; live test immediate exec start followed by a long-running command.
+
+### HC-PRR-007 — HIGH — Health manager permanently stops after lease renewal expiry while Docker API remains live
+
+**Evidence:** `health_lease.go:149-172` cancels health manager context after 15s without successful renewal. `health_manager.go:122-153` does not reacquire the Lease or restart the manager; `healthCancel` remains non-nil, making a later `StartHealthManager` call return immediately without restarting any goroutine. `cmd/d2k.go` continues serving Docker HTTP API after manager cancellation.
+
+**Impact:** transient Kubernetes control-plane outage or leadership loss can leave otherwise healthy d2k API alive but never resume health probes/replacements on recovery.
+
+**Remediation/test:** explicit liveness/leadership state machine with reacquisition or fail process to be restarted; expose health-manager readiness separately from HTTP ping; test 20s API disruption followed by full recovery.
+
+### HC-PRR-008 — HIGH — Corrupt health annotation bypasses Swarm health gating
+
+**Evidence:** `health_manager.go:208-214` skips deployments where `decodeHealthcheckAnnotation` fails; `swarm_health_lifecycle.go:638-651` calls `deploymentHealthEnabled`, which returns false for invalid JSON; neither path forces previously healthy Pods unready. A previously healthy Pod retains the readiness gate condition `True` if the Deployment health JSON is manually corrupted.
+
+**Impact:** affected Pod remains routable without a working health monitor, violating fail-closed health semantics.
+
+**Remediation/test:** distinguish absent/disabled from invalid health configuration; force readiness false on corruption; test corrupted annotation after readiness became True.
+
+### HC-PRR-009 — HIGH — Old service Pods can be adopted by a newly created service using the same name
+
+**Evidence:** `swarm_health_lifecycle.go:612-638` and `health_manager.go:197-229` select pods by `app=<deployment-name>` and d2k labels, but do not match ReplicaSet ancestry or the current Deployment UID. `ensureSwarmSlotAssignments` can adopt any nonterminating matching Pod into the newly initialized state. `loadSwarmHealthLifecycleState` correctly resets state on service UID change but cannot protect identity when live old-service Pods still match name-based selectors.
+
+**Impact:** during service delete/recreate and Kubernetes garbage-collection delays, old Pods can acquire new service slots, be reported as new tasks and probed as if owned by the new service.
+
+**Remediation/test:** verify Pod owner ReplicaSet ownership/generation against the selected Deployment; test recreate same-named Deployment before old Pods are fully reaped.
+
+### HC-PRR-010 — MEDIUM — Live Swarm task inspect omits ServiceID and NodeID
+
+**Evidence:** `swarm.go:1466-1522` matches live Pods but always calls `kubePodToSwarmTask(p, "", "", slotNumber, ...)`, whereas `SwarmListTasks` passes the actual Swarm service and node IDs at `1360-1397`.
+
+**Impact:** list and inspect disagree for the same task; clients relying on task's associated service/node identity break.
+
+**Remediation/test:** resolve current Deployment's service ID and node's Swarm ID for live inspect; assert list/inspect identity equality.
+
+### HC-PRR-011 — MEDIUM — Bounded per-slot task history does not bound total ConfigMap size after scale churn
+
+**Evidence:** `swarm_health_lifecycle.go:445-457` retires empty slots above desired count only when `TaskHistory` and `RestartHistory` are both empty. Every removed slot with up to five failed tasks survives indefinitely, independent of current desired replicas, and `swarmTaskHistoryLimit` limits per-slot only.
+
+**Impact:** repeated large scale-up/failure/scale-down cycles accumulate stale slots until Kubernetes ConfigMap size limits prevent further lifecycle reconciliation.
+
+**Remediation/test:** enforce bounded aggregate history and retire completed scale-down slots by age/retention; stress tens of thousands of historical slots.
+
+### HC-PRR-012 — MEDIUM — Same-Pod Kubernetes container restarts are not represented as new Swarm task generations
+
+**Evidence:** `swarm_health_lifecycle.go:329-348` updates `CurrentContainerID` when the kubelet restarts the target container in the same Pod but does not replace `CurrentTaskID`, record the previous failed task, or apply Swarm restart accounting. `health_manager.go:322-367` correctly starts a new health monitor, but task identity remains unchanged.
+
+**Impact:** divergence from Docker/Swarm task lifecycle, especially `none`/`MaxAttempts` restart policies. This may be a pre-existing Deployment/Kubelet abstraction limitation, not remediation-specific; investigate scope before final verdict.
+
+**Remediation/test:** establish explicit documented boundaries or per-container-restart task generation tracking; test same-Pod restart with each Swarm policy.
+
+## Notes on earlier provisional findings, assessed from pinned source (without prior ledgers)
+
+- HC-PRR-001: name-only Pod deletion confirmed in `advancePendingSwarmReplacement`; UID fencing also falls through in `setPodHealthConditionForMonitor` because it re-fetches by name after checking UID but ultimately invokes a second name-only GET/UpdateStatus.
+- HC-PRR-002: pending assignment chooses first available new Pod by creation timestamp, without a causally verified failed-task replacement relationship.
+- HC-PRR-003: check-then-delete Lease release confirmed, without delete preconditions.
+- HC-PRR-004: definitive holder mismatch is treated like a transient renewal failure until last-success timeout; monitor Pod readiness mutation is not Lease-fenced.
+
+## Not yet full proof
+
+Static source inspection demonstrates the listed paths. No concurrent live Kubernetes reproduction, full compilation, race test, or multi-arch OCI build was performed in this restart. Previous review files and remediation commit messages remain unread. Finding list is **not frozen**.
