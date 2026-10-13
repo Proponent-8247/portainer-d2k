@@ -85,3 +85,35 @@ HEAD before this journal update: `16ddb557eb4775a6c49ef18b09c12e6eac94250d`.
 5. Update `POST-REMEDIATION-REMEDIATION-HEALTHCHECK.md` with exact evidence; HC-PRR-017 remains **IN PROGRESS** until live 1->1, 2->2 and full gates pass. HC-PRR-002 remains **IN PROGRESS** with explicit same-ReplicaSet causal-identity limitation.
 6. Keep native mapping documentation and do not conflate network-isolation patch into healthcheck upstream PR; do not silently migrate existing Deployments.
 
+
+## 2026-10-13 - Recovery checkpoint R3: four native-controller kill-tests green, formatting fixed
+
+HEAD before this checkpoint commit: `666c783c9ce256721d5f22e964ded29d27dec7d3`.
+This is the latest **functional/test source** as of R3; journal-only commits that follow must not be confused with new source validation.
+
+### Implemented
+- `13af30ab3b8a60e6f29271a7c23c52719107179d`: `SwarmListTasks` uses `Deployment.Spec.Replicas` as desired Swarm slot count, never transient `Status.Replicas` when a native RollingUpdate surges.
+- `8b6d536b4511565ea8ccb2cb4fa4e9e57d10ef6d`: real-controller 2-replica update test. It opens readiness gates as Kubernetes controller progresses, then asserts real slots 1/2 and genuine task identities.
+- `678d57d49bcc682e35698391b9f79810253b88f4`: real Service + EndpointSlice test verifies the native health readiness gate admits and withdraws routing endpoints.
+- `666c783c9ce256721d5f22e964ded29d27dec7d3`: format latest native readiness test; all eight focused regressions now pass on **38465636577** (exact functional HEAD).
+- Native translation/limits matrix in `DOCKER-NATIVE-K8S-COMPATIBILITY.md`; remains a design document and must not be called fully implemented.
+
+### Test evidence and pending outcomes
+- Four Kind real-controller tests **PASS** in run **38465255625** at source `16ddb557eb4775a6c49ef18b09c12e6eac94250d`: 1->1 surge; two concurrent replacement slots; 2->2 rollout; native EndpointSlice health admit/eject. Subsequent source changes are Go formatting only, not a behavioral change.
+- Full Go + amd64/arm64 OCI **PASS** in run **38465108259**, but that is an older functional snapshot before final native EndpointSlice test.
+- Focused regressions **PASS** in run **38465636577**, exact functional HEAD `666c783c9ce256721d5f22e964ded29d27dec7d3`.
+- **PENDING at checkpoint:** full gofmt/tidy/build/test/vet/race/multiarch run **38465636607** and Kind real-controller run **38465636594**, both launched from `666c783c9ce256721d5f22e964ded29d27dec7d3`. Inspect conclusions, failed steps and exact logs. Do not infer success while in progress.
+- Earlier full runs after new tests stopped at `gofmt -l .` in `swarm_slot_live_test.go` only; corrected in `666c...`. Do not mischaracterize these as product-behavior failures.
+
+### Scope, blockers and next steps
+- `HC-PRR-017`: release-blocking expected behavior now has 1->1, 2->2, surge-readback and real-controller evidence. Keep **IN PROGRESS** until R3 full suite is green, reconcile ledger, then consider FIXED for the specific reported bug. Do not equate that closure with total feature upstream readiness.
+- `HC-PRR-002`: remains **IN PROGRESS**. Real Kind verifies deterministic *logical* task identity under simultaneous replacements, but a shared ReplicaSet does not provide exact causal physical predecessor lineage. Do not mark strict identity proven. Explore an explicit alternate native controller if strict Swarm identity is a product requirement.
+- Other HC-PRR findings, especially UID-precondition Pod delete, Lease handoff, service UID ownership and crash-after-delete, remain OPEN. Proceed with individual red/green failure-injection tests and independent validation before closing.
+- Separate Cilium/Docker-network-equivalent isolation patch is not contained in this healthcheck branch, and current networks are synthetic. Do not merge unrelated patches into upstream healthcheck PR. Integration must cover EndpointSlice + Cilium policy interactions.
+- Temporary validation workflows are still in branch; remove them from final upstream patch. Journal and investigation docs may likewise be excluded from compact submission branch, but must remain preserved in GitHub history.
+
+### Resume immediately
+1. Verify HEAD and inspect runs `38465636607` / `38465636594`. If green, update `POST-REMEDIATION-REMEDIATION-HEALTHCHECK.md` with exact references and close HC-PRR-017 only after checking all required acceptance gates.
+2. On red, diagnose concrete run logs and fix one conceptual defect per commit; never suppress tests merely to make CI green.
+3. Add regression for `HC-PRR-001` UID-precondition delete and `HC-PRR-005` crash-after-delete transaction, or preserve these as OPEN if continuing only current slot scope.
+4. Append R4 with exact new head and validation; keep previous checkpoints intact.
