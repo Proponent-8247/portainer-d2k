@@ -7,6 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -160,5 +161,130 @@ func TestSwarmPendingReplacementDoesNotStealPreexistingSurgePod(t *testing.T) {
 	}
 	if slot:=state.slotForPodUID("surge");slot!=nil && slot.Slot<=2 {
 		t.Fatalf("preexisting surge Pod stole an active slot: %#v",state.Slots)
+	}
+}
+
+func podWithReplicaSetOwner(pod corev1.Pod, uid string) corev1.Pod {
+	controller := true
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind: "ReplicaSet",
+		Name: "rs-" + uid,
+		UID: k8stypes.UID(uid),
+		Controller: &controller,
+	}}
+	return pod
+}
+
+// Even if a different ReplicaSet's Pod was created first, its Pod must not
+// inherit the restart history/identity reserved by a failed older revision.
+func TestConcurrentPendingReplacementPreservesReplicaSetProvenance(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+	dep := testSwarmDeployment("web", 2)
+	base := time.Now().Add(-time.Minute)
+	oldA := podWithReplicaSetOwner(testSwarmPod("old-a", "old-a", "web", "ctr-a", base), "revision-a")
+	oldB := podWithReplicaSetOwner(testSwarmPod("old-b", "old-b", "web", "ctr-b", base.Add(time.Second)), "revision-b")
+	for _, pod := range []corev1.Pod{oldA,oldB} {
+		if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,pod.DeepCopy(),metav1.CreateOptions{});err!=nil {
+			t.Fatalf("create old Pod: %v",err)
+		}
+	}
+	if _,err:=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{oldA,oldB});err!=nil {
+		t.Fatalf("assign initial slots: %v",err)
+	}
+	failedAt:=time.Now().Add(-10*time.Second).UnixNano()
+	_,err:=a.mutateSwarmHealthLifecycleState(ctx,dep,func(state *swarmHealthLifecycleState)(bool,error){
+		for _,entry:=range []struct{slot int; uid,revision string}{
+			{1,"old-a","revision-a"},{2,"old-b","revision-b"},
+		} {
+			state.Slots[slotKey(entry.slot)].Pending=&swarmHealthReplacementIntent{
+				FailedPodUID:entry.uid, FailedAt:failedAt,
+				FailedReplicaSetUID:entry.revision,
+				DeleteCommittedAt:time.Now().UnixNano(),
+				ReplacementTaskID:"task-"+entry.revision,
+			}
+		}
+		return true,nil
+	})
+	if err!=nil {t.Fatalf("store pending intents: %v",err)}
+	for _,pod:=range []corev1.Pod{oldA,oldB} {
+		if err:=a.client.CoreV1().Pods(a.namespace).Delete(ctx,pod.Name,metav1.DeleteOptions{});err!=nil {
+			t.Fatalf("delete old Pod: %v",err)
+		}
+	}
+	// Sort order deliberately makes revision B's replacement appear first.
+	timestamp:=time.Now()
+	newB:=podWithReplicaSetOwner(testSwarmPod("new-b","new-00","web","ctr-b2",timestamp),"revision-b")
+	newA:=podWithReplicaSetOwner(testSwarmPod("new-a","new-99","web","ctr-a2",timestamp),"revision-a")
+	for _,pod:=range []corev1.Pod{newB,newA} {
+		if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,pod.DeepCopy(),metav1.CreateOptions{});err!=nil {
+			t.Fatalf("create new Pod: %v",err)
+		}
+	}
+	state,err:=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{newB,newA})
+	if err!=nil {t.Fatalf("assign new Pods: %v",err)}
+	if slot:=state.slotForPodUID("new-99");slot==nil || slot.Slot!=1 || slot.CurrentTaskID!="task-revision-a" {
+		t.Fatalf("revision A lost its slot/task: %#v",state.Slots)
+	}
+	if slot:=state.slotForPodUID("new-00");slot==nil || slot.Slot!=2 || slot.CurrentTaskID!="task-revision-b" {
+		t.Fatalf("revision B lost its slot/task: %#v",state.Slots)
+	}
+}
+
+// When ReplicaSet makes multiple interchangeable Pods for identical tasks,
+// assignment must at least be unique and deterministic even with identical
+// timestamps and order-varying LIST responses.
+func TestConcurrentSameRevisionReplacementAssignmentDeterministic(t *testing.T) {
+	for _,reversed:=range []bool{false,true} {
+		ctx:=context.Background()
+		a:=newHealthcheckTestAdapter()
+		dep:=testSwarmDeployment("web",2)
+		base:=time.Now().Add(-time.Minute)
+		oldA:=podWithReplicaSetOwner(testSwarmPod("old-a","old-a","web","ctr-a",base),"shared")
+		oldB:=podWithReplicaSetOwner(testSwarmPod("old-b","old-b","web","ctr-b",base.Add(time.Second)),"shared")
+		for _,pod:=range []corev1.Pod{oldA,oldB} {
+			if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,pod.DeepCopy(),metav1.CreateOptions{});err!=nil {
+				t.Fatalf("create original: %v",err)
+			}
+		}
+		if _,err:=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{oldA,oldB});err!=nil {
+			t.Fatalf("initial assign: %v",err)
+		}
+		failedAt:=time.Now().Add(-10*time.Second).UnixNano()
+		_,err:=a.mutateSwarmHealthLifecycleState(ctx,dep,func(state *swarmHealthLifecycleState)(bool,error){
+			for i,uid:=range []string{"old-a","old-b"} {
+				state.Slots[slotKey(i+1)].Pending=&swarmHealthReplacementIntent{
+					FailedPodUID:uid,FailedReplicaSetUID:"shared",FailedAt:failedAt,
+					DeleteCommittedAt:time.Now().UnixNano(),
+					ReplacementTaskID:"replacement-"+uid,
+				}
+			}
+			return true,nil
+		})
+		if err!=nil {t.Fatalf("store pending: %v",err)}
+		for _,pod:=range []corev1.Pod{oldA,oldB} {
+			if err:=a.client.CoreV1().Pods(a.namespace).Delete(ctx,pod.Name,metav1.DeleteOptions{});err!=nil {
+				t.Fatalf("delete original: %v",err)
+			}
+		}
+		stamp:=time.Now()
+		c:=podWithReplicaSetOwner(testSwarmPod("new-c","c","web","ctr-c",stamp),"shared")
+		d:=podWithReplicaSetOwner(testSwarmPod("new-d","d","web","ctr-d",stamp),"shared")
+		pods:=[]corev1.Pod{c,d}
+		if reversed {pods=[]corev1.Pod{d,c}}
+		for _,pod:=range pods {
+			if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,pod.DeepCopy(),metav1.CreateOptions{});err!=nil {
+				t.Fatalf("create replacement Pod: %v",err)
+			}
+		}
+		state,err:=a.ensureSwarmSlotAssignments(ctx,dep,pods)
+		if err!=nil {t.Fatalf("assign replacements: %v",err)}
+		if slot:=state.slotForPodUID("c");slot==nil || slot.Slot!=1 {
+			t.Fatalf("UID c not stable slot 1 (reversed=%v): %#v",reversed,state.Slots)
+		}
+		if slot:=state.slotForPodUID("d");slot==nil || slot.Slot!=2 {
+			t.Fatalf("UID d not stable slot 2 (reversed=%v): %#v",reversed,state.Slots)
+		}
 	}
 }
