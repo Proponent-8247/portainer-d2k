@@ -148,3 +148,28 @@ Functional/test source pinned: `666c783c9ce256721d5f22e964ded29d27dec7d3`. No pr
 4. Decide whether strict Swarm task identity (HC-PRR-002) needs a new optional native controller or a documented limited-support mode. Do not silently weaken the upstream target.
 5. Keep each conceptual fix isolated; preserve current source SHA, rerun strict exact-head validation, and append R5.
 6. Temporary test workflows and investigation docs must not be blindly included in upstream PR; extract a focused patch without rewriting the published working branch.
+
+## 2026-10-13 - Recovery checkpoint R5: native Pod UID fencing source merged, validation underway
+
+Latest **functional** source: `93b1dee1f0b94a864e895483c0405f77b5a4a431`.
+Working-branch ledger note: `POST-REMEDIATION-REMEDIATION-HEALTHCHECK.md` at `9f84fd46f89f600cb5fb0ce4075c8be16f14ad72`.
+No branch history rewritten.
+
+### HC-PRR-001 source and red/green evidence
+- Red tests committed at `5d00fef08ee3259e5f380202ded4cb6b427d9e25` and selected into focused CI at `86034c20f69489f8df43f6c47c7f08571466d8ee`.
+- **RED** `38466415572`: name-only Pod deletion had no Kubernetes UID precondition; stale health failure modified a same-name Pod with a different UID. Existing slot cases PASS.
+- **Fix** `414f4a804ba36a28d1ec8403b8b1284d970f479e` (atomic changes to `health_manager.go` and `swarm_health_lifecycle.go`): UID-aware status mutation; monitor+Swarm call paths pass Pod UID; native Pod DELETE uses `metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: ...}}`.
+- Behavioral UID tests **PASS** in `38466970659`; intermediate full focused run failed only `gofmt` import order in `swarm_health_uid_fencing_test.go`.
+- Formatter corrected in `93b1dee1f0b94a864e895483c0405f77b5a4a431`.
+- **Pending at R5** exact-source runs: focused `38467235235`, Kind `38467235234`, full gofmt/tidy/build/test/vet/race+amd64/arm64 `38467235317`. Inspect outcomes before marking HC-PRR-001 FIXED.
+
+### CI workflow hygiene
+- `a6739ef37dc4149826e3c794180eab6b918d52ac`: temporary PRR validation workflows now use push path filtering for Go, go.mod/go.sum, Dockerfile, deploy and workflow changes plus manual dispatch. New journal/document-only commits should **not** spawn redundant Go/multi-arch/Kind runs.
+- Keep temporary validation workflows until remaining HC-PRR work is accepted; exclude them from the eventual narrow upstream PR unless maintainers request them.
+
+### Next action
+1. Verify current HEAD and tests `38467235235`, `38467235234`, `38467235317`.
+2. If all green on `93b1...`, update ledger: `HC-PRR-001` IN PROGRESS -> FIXED. The exact tested source may be an ancestor of doc-only journal updates.
+3. For `HC-PRR-005`, run a **real ReplicaSet/controller** test simulating crash after successful Pod deletion and before persistent DeleteCommittedAt, then new d2k instance/Lease owner adopting replacement with the reserved task ID. Do not close using only fake clients.
+4. Pursue remaining UID/ownership and Lease handoff defects without changing intended Docker/Swarm behavior or merging the separate Cilium network patch.
+5. Append R6 after exact-head validation; preserve earlier journal entries and findings.
