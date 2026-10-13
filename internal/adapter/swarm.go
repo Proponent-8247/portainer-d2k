@@ -1340,8 +1340,11 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 			return nil, lifecycleErr
 		}
 
+		// Swarm task slots describe desired service replicas, not transient
+		// Kubernetes RollingUpdate surge capacity. Deployment.Status.Replicas
+		// includes surge Pods and would otherwise invent extra Swarm slots.
 		desired := dep.Status.Replicas
-		if dep.Spec.Replicas != nil && *dep.Spec.Replicas > desired {
+		if dep.Spec.Replicas != nil {
 			desired = *dep.Spec.Replicas
 		}
 
