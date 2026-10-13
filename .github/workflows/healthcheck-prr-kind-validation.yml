@@ -1,0 +1,37 @@
+name: healthcheck-prr-kind-acceptance
+
+on:
+  push:
+    branches: [ "feature/docker-healthchecks-upstream" ]
+
+permissions:
+  contents: read
+
+jobs:
+  controller-rollout:
+    name: real-controller-rollout
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Start disposable Kubernetes 1.35 cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.31.0
+          node_image: kindest/node:v1.35.0
+          wait: 180s
+      - name: Show controller readiness
+        run: |
+          kubectl get nodes -o wide
+          kubectl get pods -A
+      - name: Test real Deployment surge and slot promotion
+        env:
+          D2K_LIVE_K8S: "1"
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          go test -tags livek8s ./internal/adapter -run '^TestLiveDeploymentSurgeSlotConvergesAfterRollingUpdate$' -v -count=1 -timeout 9m
