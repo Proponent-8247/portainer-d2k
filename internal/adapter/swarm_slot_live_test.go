@@ -526,3 +526,106 @@ func TestLiveNativeServiceEndpointHealthGating(t *testing.T) {
 		return !ready, err
 	})
 }
+
+func TestLiveCrashAfterPodDeleteBeforeIntentCommitRecoversSlot(t *testing.T) {
+	a, deployment := liveSlotTestAdapter(t, 1)
+	ctx := context.Background()
+	a.healthLeaseID = "before-crash"
+	if err := a.acquireHealthManagerLease(ctx); err != nil {
+		t.Fatalf("acquire original health-manager lease: %v", err)
+	}
+	var failed corev1.Pod
+	waitForLiveCondition(t, "original running Pod", func() (bool, error) {
+		pods, err := livePods(ctx, a)
+		if err != nil {
+			return false, err
+		}
+		if len(pods) != 1 || pods[0].Status.Phase != corev1.PodRunning {
+			return false, nil
+		}
+		failed = pods[0]
+		return true, nil
+	})
+	state, err := a.ensureSwarmSlotAssignments(ctx, deployment, []corev1.Pod{failed})
+	if err != nil {
+		t.Fatalf("assign initial Swarm slot: %v", err)
+	}
+	initialTaskID := state.Slots["1"].CurrentTaskID
+	created, err := a.beginSwarmHealthReplacement(ctx, deployment, failed, 1,
+		swarmHealthRestartPolicy{Condition: "on-failure", MaxAttempts: 1, Window: time.Hour},
+		nil)
+	if err != nil || !created {
+		t.Fatalf("record health-failure intent: created=%v err=%v", created, err)
+	}
+	persisted, _, err := a.loadSwarmHealthLifecycleState(ctx, deployment)
+	if err != nil {
+		t.Fatalf("load pending intent: %v", err)
+	}
+	pending := persisted.Slots["1"].Pending
+	if pending == nil || pending.DeleteCommittedAt != 0 || pending.ReplacementTaskID == "" {
+		t.Fatalf("expected pre-delete pending identity: %#v", pending)
+	}
+	reservedTaskID := pending.ReplacementTaskID
+
+	// Simulate a Kubernetes DELETE succeeding immediately before the d2k
+	// process dies, leaving DeleteCommittedAt unpersisted in the ConfigMap.
+	uid := failed.UID
+	if err := a.client.CoreV1().Pods(a.namespace).Delete(ctx, failed.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}); err != nil {
+		t.Fatalf("delete failed Pod with Kubernetes UID precondition: %v", err)
+	}
+	a.releaseHealthManagerLease(ctx)
+
+	// New process with the same Kubernetes data source and a different
+	// health-manager identity must reconcile the durable incomplete intent.
+	recovered := &KubernetesDockerAdapter{
+		client:        a.client,
+		namespace:     a.namespace,
+		logger:        a.logger,
+		healthLeaseID: "after-crash",
+	}
+	if err := recovered.acquireHealthManagerLease(ctx); err != nil {
+		t.Fatalf("acquire recovered manager lease: %v", err)
+	}
+	defer recovered.releaseHealthManagerLease(ctx)
+
+	var replacement corev1.Pod
+	waitForLiveCondition(t, "native ReplicaSet replacement after crash", func() (bool, error) {
+		pods, err := livePods(ctx, recovered)
+		if err != nil {
+			return false, err
+		}
+		if len(pods) != 1 || pods[0].UID == failed.UID || pods[0].Status.Phase != corev1.PodRunning {
+			return false, nil
+		}
+		replacement = pods[0]
+		return true, nil
+	})
+	state, err = recovered.ensureSwarmSlotAssignments(ctx, deployment, []corev1.Pod{replacement})
+	if err != nil {
+		t.Fatalf("reconcile before committing missing delete intent: %v", err)
+	}
+	if slot := state.slotForPodUID(string(replacement.UID)); slot != nil {
+		t.Fatalf("replacement prematurely adopted incomplete pending slot: %#v", state.Slots)
+	}
+	if slot := state.Slots["1"]; slot == nil || slot.Pending == nil || slot.Pending.DeleteCommittedAt != 0 {
+		t.Fatalf("pending slot was lost during process recovery: %#v", state.Slots)
+	}
+	if err := recovered.advancePendingSwarmReplacement(ctx, deployment, 1, map[string]corev1.Pod{
+		string(replacement.UID): replacement,
+	}); err != nil {
+		t.Fatalf("resume deletion-commit transaction: %v", err)
+	}
+	state, err = recovered.ensureSwarmSlotAssignments(ctx, deployment, []corev1.Pod{replacement})
+	if err != nil {
+		t.Fatalf("assign replacement after transaction commit: %v", err)
+	}
+	slot := state.slotForPodUID(string(replacement.UID))
+	if slot == nil || slot.Slot != 1 || slot.CurrentTaskID != reservedTaskID || slot.Pending != nil {
+		t.Fatalf("recovered task did not inherit reserved slot identity: %#v", state.Slots)
+	}
+	if len(slot.RestartHistory) != 1 || len(slot.TaskHistory) != 1 || slot.TaskHistory[0].ID != initialTaskID {
+		t.Fatalf("crash recovery lost/duplicated restart history: %#v", slot)
+	}
+}
