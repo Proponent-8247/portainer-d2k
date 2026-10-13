@@ -236,17 +236,27 @@ func TestLiveConcurrentReplacementSlotsRemainUnique(t *testing.T) {
 	var old []corev1.Pod
 	waitForLiveCondition(t, "two initial Running Pods", func() (bool, error) {
 		pods, err := livePods(ctx, a)
-		if err != nil { return false, err }
-		if len(pods) != 2 { return false, nil }
+		if err != nil {
+			return false, err
+		}
+		if len(pods) != 2 {
+			return false, nil
+		}
 		for _, pod := range pods {
-			if pod.Status.Phase != corev1.PodRunning { return false, nil }
+			if pod.Status.Phase != corev1.PodRunning {
+				return false, nil
+			}
 		}
 		old = pods
 		return true, nil
 	})
 	state, err := a.ensureSwarmSlotAssignments(ctx, dep, old)
-	if err != nil { t.Fatalf("initial slot assignment: %v", err) }
-	if len(state.Slots) < 2 { t.Fatalf("missing original slots: %#v", state.Slots) }
+	if err != nil {
+		t.Fatalf("initial slot assignment: %v", err)
+	}
+	if len(state.Slots) < 2 {
+		t.Fatalf("missing original slots: %#v", state.Slots)
+	}
 
 	failureAt := time.Now().UnixNano()
 	knownUIDs := []string{string(old[0].UID), string(old[1].UID)}
@@ -254,21 +264,25 @@ func TestLiveConcurrentReplacementSlotsRemainUnique(t *testing.T) {
 	_, err = a.mutateSwarmHealthLifecycleState(ctx, dep, func(state *swarmHealthLifecycleState) (bool, error) {
 		for _, pod := range old {
 			slot := state.slotForPodUID(string(pod.UID))
-			if slot == nil { return false, fmt.Errorf("lost original Pod UID %s", pod.UID) }
+			if slot == nil {
+				return false, fmt.Errorf("lost original Pod UID %s", pod.UID)
+			}
 			slot.Pending = &swarmHealthReplacementIntent{
-				FailedPodUID: string(pod.UID),
-				FailedPodName: pod.Name,
-				FailedTaskID: slot.CurrentTaskID,
-				FailedAt: failureAt,
+				FailedPodUID:        string(pod.UID),
+				FailedPodName:       pod.Name,
+				FailedTaskID:        slot.CurrentTaskID,
+				FailedAt:            failureAt,
 				FailedReplicaSetUID: podReplicaSetOwnerUID(pod),
-				KnownPodUIDs: append([]string{}, knownUIDs...),
-				DeleteCommittedAt: failureAt,
-				ReplacementTaskID: fmt.Sprintf("reserved-slot-%d", slot.Slot),
+				KnownPodUIDs:        append([]string{}, knownUIDs...),
+				DeleteCommittedAt:   failureAt,
+				ReplacementTaskID:   fmt.Sprintf("reserved-slot-%d", slot.Slot),
 			}
 		}
 		return true, nil
 	})
-	if err != nil { t.Fatalf("record simultaneous pending replacements: %v", err) }
+	if err != nil {
+		t.Fatalf("record simultaneous pending replacements: %v", err)
+	}
 	for _, pod := range old {
 		if err := a.client.CoreV1().Pods(a.namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
 			t.Fatalf("delete failed task Pod: %v", err)
@@ -278,8 +292,12 @@ func TestLiveConcurrentReplacementSlotsRemainUnique(t *testing.T) {
 	var replacements []corev1.Pod
 	waitForLiveCondition(t, "two actual replacement Pods", func() (bool, error) {
 		pods, err := livePods(ctx, a)
-		if err != nil { return false, err }
-		if len(pods) != 2 { return false, nil }
+		if err != nil {
+			return false, err
+		}
+		if len(pods) != 2 {
+			return false, nil
+		}
 		for _, pod := range pods {
 			if pod.UID == old[0].UID || pod.UID == old[1].UID || pod.Status.Phase != corev1.PodRunning {
 				return false, nil
@@ -289,7 +307,9 @@ func TestLiveConcurrentReplacementSlotsRemainUnique(t *testing.T) {
 		return true, nil
 	})
 	state, err = a.ensureSwarmSlotAssignments(ctx, dep, replacements)
-	if err != nil { t.Fatalf("assign real replacement Pods: %v", err) }
+	if err != nil {
+		t.Fatalf("assign real replacement Pods: %v", err)
+	}
 	found := map[int]string{}
 	for _, pod := range replacements {
 		slot := state.slotForPodUID(string(pod.UID))
@@ -300,25 +320,31 @@ func TestLiveConcurrentReplacementSlotsRemainUnique(t *testing.T) {
 			t.Fatalf("duplicate Swarm slot %d owners %q and %q", slot.Slot, owner, pod.Name)
 		}
 		found[slot.Slot] = pod.Name
-		if slot.CurrentTaskID != fmt.Sprintf("reserved-slot-%d",slot.Slot) {
-			t.Fatalf("lost reserved task ID in slot %d: %#v",slot.Slot,slot)
+		if slot.CurrentTaskID != fmt.Sprintf("reserved-slot-%d", slot.Slot) {
+			t.Fatalf("lost reserved task ID in slot %d: %#v", slot.Slot, slot)
 		}
 		if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionTrue, "TestHealthy", "healthy"); err != nil {
-			t.Fatalf("set replacement ready: %v",err)
+			t.Fatalf("set replacement ready: %v", err)
 		}
 	}
 	waitForLiveCondition(t, "two available replacement replicas", func() (bool, error) {
 		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, dep.Name, metav1.GetOptions{})
-		if err != nil { return false, err }
+		if err != nil {
+			return false, err
+		}
 		return d.Status.AvailableReplicas == 2, nil
 	})
 	tasks, err := a.SwarmListTasks(ctx, "web", "")
-	if err != nil { t.Fatalf("task readback: %v", err) }
-	if len(tasks) != 2 { t.Fatalf("expected two real current tasks: %#v",tasks) }
+	if err != nil {
+		t.Fatalf("task readback: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected two real current tasks: %#v", tasks)
+	}
 	for _, task := range tasks {
 		slotNum, ok := task["Slot"].(int)
 		if !ok || slotNum < 1 || slotNum > 2 || task["ID"] != fmt.Sprintf("reserved-slot-%d", slotNum) {
-			t.Fatalf("incorrect task slot/identity: %#v",task)
+			t.Fatalf("incorrect task slot/identity: %#v", task)
 		}
 	}
 }
