@@ -469,8 +469,8 @@ func TestLiveNativeServiceEndpointHealthGating(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"app": deployment.Name},
 			Ports: []corev1.ServicePort{{
-				Name: "http",
-				Port: 80,
+				Name:       "http",
+				Port:       80,
 				TargetPort: intstr.FromInt(80),
 			}},
 		},
