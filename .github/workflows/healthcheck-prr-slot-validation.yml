@@ -19,7 +19,7 @@ jobs:
           go-version-file: go.mod
       - name: Slot regression tests
         run: |
-          go test ./internal/adapter -run 'Test(SwarmRolloutSurgeSlotPromotedWhenOldPodDisappears|UncommittedReplacementIntentReservesSlotAfterDeleteCrash|SwarmPendingReplacementDoesNotStealPreexistingSurgePod|ConcurrentPendingReplacementPreservesReplicaSetProvenance|ConcurrentSameRevisionReplacementAssignmentDeterministic|ReplacementCandidateAllowsKubernetesSecondPrecisionTimestamp|ReplacementExcludesPreviouslyObservedSurgePodInSameSecond|SwarmTaskListPrefersCurrentPodOverTerminatingFormerSlotOwner)$' -count=1 -v
+          go test ./internal/adapter -run 'Test(SwarmRolloutSurgeSlotPromotedWhenOldPodDisappears|UncommittedReplacementIntentReservesSlotAfterDeleteCrash|SwarmPendingReplacementDoesNotStealPreexistingSurgePod|ConcurrentPendingReplacementPreservesReplicaSetProvenance|ConcurrentSameRevisionReplacementAssignmentDeterministic|ReplacementCandidateAllowsKubernetesSecondPrecisionTimestamp|ReplacementExcludesPreviouslyObservedSurgePodInSameSecond|SwarmTaskListPrefersCurrentPodOverTerminatingFormerSlotOwner|SwarmReplacementDeleteRequiresPodUIDPrecondition|SwarmReplacementCannotDeleteReusedPodName)$' -count=1 -v
       - name: Validate Go formatting of slot changes
         run: |
           echo '--- GOFMT DIFF BEGIN ---'
