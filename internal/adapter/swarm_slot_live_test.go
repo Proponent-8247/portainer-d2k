@@ -348,3 +348,115 @@ func TestLiveConcurrentReplacementSlotsRemainUnique(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveTwoReplicaRollingUpdatePreservesSwarmTasks(t *testing.T) {
+	a, deployment := liveSlotTestAdapter(t, 2)
+	ctx := context.Background()
+	var original []corev1.Pod
+
+	waitForLiveCondition(t, "two initial running Pods", func() (bool, error) {
+		pods, err := livePods(ctx, a)
+		if err != nil {
+			return false, err
+		}
+		if len(pods) != 2 {
+			return false, nil
+		}
+		for _, pod := range pods {
+			if pod.Status.Phase != corev1.PodRunning {
+				return false, nil
+			}
+		}
+		original = pods
+		return true, nil
+	})
+	if _, err := a.ensureSwarmSlotAssignments(ctx, deployment, original); err != nil {
+		t.Fatalf("assign initial slots: %v", err)
+	}
+	oldUIDs := map[string]struct{}{}
+	for _, pod := range original {
+		oldUIDs[string(pod.UID)] = struct{}{}
+		if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionTrue, "TestHealthy", "ready"); err != nil {
+			t.Fatalf("mark old Pod ready: %v", err)
+		}
+	}
+	waitForLiveCondition(t, "two available initial Pods", func() (bool, error) {
+		current, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+		return err == nil && current.Status.AvailableReplicas == 2, err
+	})
+
+	current, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	changed := current.DeepCopy()
+	if changed.Spec.Template.Annotations == nil {
+		changed.Spec.Template.Annotations = map[string]string{}
+	}
+	changed.Spec.Template.Annotations["d2k-prr-test-rollout"] = "two-replicas"
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, changed, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("start two-replica update: %v", err)
+	}
+
+	var finalState *swarmHealthLifecycleState
+	var finalPods []corev1.Pod
+	waitForLiveCondition(t, "two-replica rolling update convergence", func() (bool, error) {
+		latest, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		pods, err := livePods(ctx, a)
+		if err != nil {
+			return false, err
+		}
+		state, err := a.ensureSwarmSlotAssignments(ctx, *latest, pods)
+		if err != nil {
+			return false, err
+		}
+		for _, pod := range pods {
+			if _, wasOld := oldUIDs[string(pod.UID)]; wasOld {
+				continue
+			}
+			if pod.Status.Phase == corev1.PodRunning {
+				if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionTrue, "TestHealthy", "ready"); err != nil {
+					return false, err
+				}
+			}
+		}
+		if len(pods) != 2 || latest.Status.UpdatedReplicas != 2 || latest.Status.AvailableReplicas != 2 {
+			return false, nil
+		}
+		for _, pod := range pods {
+			if _, wasOld := oldUIDs[string(pod.UID)]; wasOld {
+				return false, nil
+			}
+			if state.slotForPodUID(string(pod.UID)) == nil {
+				return false, nil
+			}
+		}
+		finalState, finalPods = state, pods
+		return true, nil
+	})
+	if len(finalPods) != 2 || finalState == nil {
+		t.Fatal("two-replica update did not produce two real current tasks")
+	}
+	for slot := 1; slot <= 2; slot++ {
+		currentSlot := finalState.Slots[slotKey(slot)]
+		if currentSlot == nil || currentSlot.CurrentPodUID == "" || currentSlot.CurrentTaskID == "" {
+			t.Fatalf("real Swarm slot %d missing after rollout: %#v", slot, finalState.Slots)
+		}
+	}
+	tasks, err := a.SwarmListTasks(ctx, "web", "")
+	if err != nil {
+		t.Fatalf("Swarm task readback: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("two-replica rollout exposes incorrect task count: %#v", tasks)
+	}
+	for _, task := range tasks {
+		slot, ok := task["Slot"].(int)
+		if !ok || slot < 1 || slot > 2 || task["ID"] != finalState.Slots[slotKey(slot)].CurrentTaskID {
+			t.Fatalf("task readback did not match real slot identity: %#v", task)
+		}
+	}
+}
