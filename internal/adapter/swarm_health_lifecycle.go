@@ -55,6 +55,7 @@ type swarmHealthReplacementIntent struct {
 	FailedPodName     string                   `json:"failedPodName"`
 	FailedTaskID      string                   `json:"failedTaskID"`
 	FailedContainerID string                   `json:"failedContainerID,omitempty"`
+	FailedReplicaSetUID string                 `json:"failedReplicaSetUID,omitempty"`
 	FailedNodeName    string                   `json:"failedNodeName,omitempty"`
 	FailedAt          int64                    `json:"failedAt"`
 	DeleteCommittedAt int64                    `json:"deleteCommittedAt,omitempty"`
@@ -252,6 +253,18 @@ func parseSwarmSlotLabel(pod corev1.Pod) int {
 	return slot
 }
 
+// podReplicaSetOwnerUID returns the controller UID, not a user-controlled
+// label. A rollout creates a different ReplicaSet, so it must not consume
+// a health replacement for a task from the previous revision.
+func podReplicaSetOwnerUID(pod corev1.Pod) string {
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "ReplicaSet" && owner.Controller != nil && *owner.Controller {
+			return string(owner.UID)
+		}
+	}
+	return ""
+}
+
 func targetContainerID(pod corev1.Pod, workloadName string) string {
 	status, ok := containerStatusByName(pod, workloadName)
 	if !ok {
@@ -286,6 +299,9 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 	pods []corev1.Pod,
 ) (*swarmHealthLifecycleState, error) {
 	sort.Slice(pods, func(i, j int) bool {
+		if pods[i].CreationTimestamp.Equal(&pods[j].CreationTimestamp) {
+			return string(pods[i].UID) < string(pods[j].UID)
+		}
 		return pods[i].CreationTimestamp.Before(&pods[j].CreationTimestamp)
 	})
 	live := map[string]corev1.Pod{}
@@ -318,6 +334,47 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 			if slot.Pending == nil {
 				slot.CurrentTaskID = ""
 			}
+			changed = true
+		}
+
+		// Deployment RollingUpdate can create up to maxSurge extra Pods.
+		// Those Pods need temporary identities so that their health gates can
+		// open and the Deployment controller can complete the rollout. However,
+		// a surge identity above desiredReplicas must not survive indefinitely:
+		// Swarm task readback exposes only slots 1..desiredReplicas. Promote
+		// such a Pod into an *empty* real slot once its predecessor disappears.
+		// Never replace a current Pod or steal a slot with a pending replacement.
+		for targetNumber := 1; targetNumber <= desired; targetNumber++ {
+			target := state.Slots[slotKey(targetNumber)]
+			if target != nil && (target.CurrentPodUID != "" || target.Pending != nil) {
+				continue
+			}
+			var source *swarmHealthSlotState
+			for _, candidate := range state.Slots {
+				if candidate == nil || candidate.Slot <= desired || candidate.Pending != nil || candidate.CurrentPodUID == "" {
+					continue
+				}
+				if _, exists := live[candidate.CurrentPodUID]; !exists {
+					continue
+				}
+				if source == nil || candidate.Slot < source.Slot {
+					source = candidate
+				}
+			}
+			if source == nil {
+				continue
+			}
+			target = state.ensureSlot(targetNumber)
+			target.CurrentPodUID = source.CurrentPodUID
+			target.CurrentPodName = source.CurrentPodName
+			target.CurrentContainerID = source.CurrentContainerID
+			target.CurrentTaskID = source.CurrentTaskID
+			target.ActivationNotBefore = source.ActivationNotBefore
+			source.CurrentPodUID = ""
+			source.CurrentPodName = ""
+			source.CurrentContainerID = ""
+			source.CurrentTaskID = ""
+			source.ActivationNotBefore = 0
 			changed = true
 		}
 
@@ -383,15 +440,28 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 		}
 		sort.Ints(pendingSlots)
 		for _, slotNumber := range pendingSlots {
+			pending := state.Slots[slotKey(slotNumber)].Pending
 			var podUID string
 			for _, uid := range orderedUIDs {
-				if assigned[uid] == 0 {
-					podUID = uid
-					break
+				if assigned[uid] != 0 {
+					continue
 				}
+				candidate := live[uid]
+				// A Pod born before the failure can be a rolling-update surge
+				// Pod, not a replacement. Do not steal its identity.
+				if pending.FailedAt != 0 &&
+					(candidate.CreationTimestamp.IsZero() || candidate.CreationTimestamp.Time.UnixNano() < pending.FailedAt) {
+					continue
+				}
+				if pending.FailedReplicaSetUID != "" &&
+					podReplicaSetOwnerUID(candidate) != pending.FailedReplicaSetUID {
+					continue
+				}
+				podUID = uid
+				break
 			}
 			if podUID == "" {
-				break
+				continue
 			}
 			pod := live[podUID]
 			slot := state.ensureSlot(slotNumber)
@@ -410,21 +480,35 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 		}
 
 		// Assign scale-up / initially created Pods to the lowest vacant stable
-		// slots. Existing Pods are never renumbered.
+		// slots. A Pending replacement reserves its slot even when the old
+		// Pod has disappeared but its deletion has not yet been committed.
+		hasPending := false
+		for _, slot := range state.Slots {
+			if slot != nil && slot.Pending != nil {
+				hasPending = true
+				break
+			}
+		}
 		nextVacant := func() int {
 			upper := desired
 			if len(live) > upper {
 				upper = len(live)
 			}
 			for slot := 1; slot <= upper; slot++ {
-				if usedSlots[slot] == "" {
-					return slot
+				if usedSlots[slot] != "" {
+					continue
 				}
+				if reserved := state.Slots[slotKey(slot)]; reserved != nil && reserved.Pending != nil {
+					continue
+				}
+				return slot
 			}
 			return 0
 		}
 		for _, uid := range orderedUIDs {
-			if assigned[uid] != 0 {
+			if assigned[uid] != 0 || hasPending {
+				// New Pods cannot become independent scale-up tasks while a
+				// failed task's replacement identity is still reserved.
 				continue
 			}
 			pod := live[uid]
@@ -798,6 +882,7 @@ func (a *KubernetesDockerAdapter) beginSwarmHealthReplacement(
 			FailedPodName:     pod.Name,
 			FailedTaskID:      record.ID,
 			FailedContainerID: slot.CurrentContainerID,
+			FailedReplicaSetUID: podReplicaSetOwnerUID(pod),
 			FailedNodeName:    pod.Spec.NodeName,
 			FailedAt:          now.UnixNano(),
 			Error:             "container unhealthy",
