@@ -56,6 +56,7 @@ type swarmHealthReplacementIntent struct {
 	FailedTaskID      string                   `json:"failedTaskID"`
 	FailedContainerID string                   `json:"failedContainerID,omitempty"`
 	FailedReplicaSetUID string                 `json:"failedReplicaSetUID,omitempty"`
+	KnownPodUIDs []string `json:"knownPodUIDs,omitempty"`
 	FailedNodeName    string                   `json:"failedNodeName,omitempty"`
 	FailedAt          int64                    `json:"failedAt"`
 	DeleteCommittedAt int64                    `json:"deleteCommittedAt,omitempty"`
@@ -265,6 +266,20 @@ func podReplicaSetOwnerUID(pod corev1.Pod) string {
 	return ""
 }
 
+// knownReplacementPodUID excludes Pods that were already visible when the
+// failure intent was created, including pre-existing RollingUpdate surge Pods.
+func knownReplacementPodUID(intent *swarmHealthReplacementIntent, uid string) bool {
+	if intent == nil {
+		return false
+	}
+	for _, existing := range intent.KnownPodUIDs {
+		if existing == uid {
+			return true
+		}
+	}
+	return false
+}
+
 func targetContainerID(pod corev1.Pod, workloadName string) string {
 	status, ok := containerStatusByName(pod, workloadName)
 	if !ok {
@@ -449,8 +464,16 @@ func (a *KubernetesDockerAdapter) ensureSwarmSlotAssignments(
 				candidate := live[uid]
 				// A Pod born before the failure can be a rolling-update surge
 				// Pod, not a replacement. Do not steal its identity.
+				// Kubernetes CreationTimestamp is commonly serialized at
+				// second precision while FailedAt is persisted in nanoseconds.
+				// Reject earlier seconds; a same-second candidate is safe only
+				// if it was not already observed at failure-intent creation.
 				if pending.FailedAt != 0 &&
-					(candidate.CreationTimestamp.IsZero() || candidate.CreationTimestamp.Time.UnixNano() < pending.FailedAt) {
+					(candidate.CreationTimestamp.IsZero() ||
+						candidate.CreationTimestamp.Time.Unix() < time.Unix(0, pending.FailedAt).Unix()) {
+					continue
+				}
+				if knownReplacementPodUID(pending, uid) {
 					continue
 				}
 				if pending.FailedReplicaSetUID != "" &&
@@ -853,9 +876,24 @@ func (a *KubernetesDockerAdapter) beginSwarmHealthReplacement(
 	if err := a.healthManagerLeaseOwned(ctx); err != nil {
 		return false, err
 	}
+	// Take a failure-time Pod snapshot before creating durable intent.
+	// A pre-existing surge Pod cannot subsequently impersonate this task's
+	// replacement, even if Kubernetes rounds both timestamps to the same second.
+	observedPods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s,%s=%s", deployment.Name, types.LabelSwarmManagedBy, types.LabelSwarmManagedByValue),
+	})
+	if err != nil {
+		return false, fmt.Errorf("unable to snapshot Pods before Swarm health replacement: %w", err)
+	}
+	knownUIDs := make([]string, 0, len(observedPods.Items))
+	for _, existing := range observedPods.Items {
+		knownUIDs = append(knownUIDs, string(existing.UID))
+	}
+	sort.Strings(knownUIDs)
+
 	now := time.Now()
 	created := false
-	_, err := a.mutateSwarmHealthLifecycleState(ctx, deployment, func(state *swarmHealthLifecycleState) (bool, error) {
+	_, err = a.mutateSwarmHealthLifecycleState(ctx, deployment, func(state *swarmHealthLifecycleState) (bool, error) {
 		slot := state.ensureSlot(slotNumber)
 		if slot.CurrentPodUID != string(pod.UID) {
 			return false, nil
@@ -883,6 +921,7 @@ func (a *KubernetesDockerAdapter) beginSwarmHealthReplacement(
 			FailedTaskID:      record.ID,
 			FailedContainerID: slot.CurrentContainerID,
 			FailedReplicaSetUID: podReplicaSetOwnerUID(pod),
+			KnownPodUIDs: knownUIDs,
 			FailedNodeName:    pod.Spec.NodeName,
 			FailedAt:          now.UnixNano(),
 			Error:             "container unhealthy",
