@@ -19,4 +19,4 @@ jobs:
           go-version-file: go.mod
       - name: Slot regression tests
         run: |
-          go test ./internal/adapter -run 'Test(SwarmRolloutSurgeSlotPromotedWhenOldPodDisappears|UncommittedReplacementIntentReservesSlotAfterDeleteCrash|SwarmPendingReplacementDoesNotStealPreexistingSurgePod)$' -count=1 -v
+          go test ./internal/adapter -run 'Test(SwarmRolloutSurgeSlotPromotedWhenOldPodDisappears|UncommittedReplacementIntentReservesSlotAfterDeleteCrash|SwarmPendingReplacementDoesNotStealPreexistingSurgePod|ConcurrentPendingReplacementPreservesReplicaSetProvenance|ConcurrentSameRevisionReplacementAssignmentDeterministic|ReplacementCandidateAllowsKubernetesSecondPrecisionTimestamp)$' -count=1 -v
