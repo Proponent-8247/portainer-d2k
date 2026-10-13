@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	dockertypes "github.com/docker/docker/api/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -324,5 +325,64 @@ func TestReplacementCandidateAllowsKubernetesSecondPrecisionTimestamp(t *testing
 	if err!=nil {t.Fatalf("assign candidate: %v",err)}
 	if slot:=state.slotForPodUID("new");slot==nil || slot.Slot!=1 {
 		t.Fatalf("second-precision CreationTimestamp stranded replacement: %#v",state.Slots)
+	}
+}
+
+func TestReplacementExcludesPreviouslyObservedSurgePodInSameSecond(t *testing.T) {
+	ctx:=context.Background()
+	a:=newHealthcheckTestAdapter()
+	a.healthLeaseID="known-uid-test"
+	if err:=a.acquireHealthManagerLease(ctx);err!=nil {t.Fatalf("acquire lease: %v",err)}
+	defer a.releaseHealthManagerLease(ctx)
+	dep:=testSwarmDeployment("web",1)
+	if _,err:=a.client.AppsV1().Deployments(a.namespace).Create(ctx,dep.DeepCopy(),metav1.CreateOptions{});err!=nil {
+		t.Fatalf("create Deployment: %v",err)
+	}
+	old:=testSwarmPod("old","old","web","ctr-old",time.Now().Add(-time.Minute))
+	// The surge Pod already existed before the health failure, but has not
+	// yet been seen by the slot reconciler.
+	second:=time.Now().Truncate(time.Second)
+	stale:=testSwarmPod("surge","surge","web","ctr-surge",second)
+	for _,pod:=range []corev1.Pod{old,stale} {
+		if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,pod.DeepCopy(),metav1.CreateOptions{});err!=nil {
+			t.Fatalf("create Pod: %v",err)
+		}
+	}
+	if _,err:=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{old});err!=nil {
+		t.Fatalf("assign original: %v",err)
+	}
+	created,err:=a.beginSwarmHealthReplacement(ctx,dep,old,1,
+		swarmHealthRestartPolicy{Condition:"on-failure"},
+		&dockertypes.Health{Status:dockertypes.Unhealthy})
+	if err!=nil || !created {t.Fatalf("begin pending: created=%v error=%v",created,err)}
+	state,_,err:=a.loadSwarmHealthLifecycleState(ctx,dep)
+	if err!=nil {t.Fatalf("read pending: %v",err)}
+	pending:=state.Slots["1"].Pending
+	if pending==nil {t.Fatal("pending replacement missing")}
+	foundStale:=false
+	for _,uid:=range pending.KnownPodUIDs {if uid=="surge" {foundStale=true}}
+	if !foundStale {t.Fatalf("failure intent did not snapshot surge UID: %#v",pending.KnownPodUIDs)}
+
+	if err:=a.client.CoreV1().Pods(a.namespace).Delete(ctx,old.Name,metav1.DeleteOptions{});err!=nil {
+		t.Fatalf("delete failed Pod: %v",err)
+	}
+	_,err=a.mutateSwarmHealthLifecycleState(ctx,dep,func(state *swarmHealthLifecycleState)(bool,error){
+		state.Slots["1"].Pending.DeleteCommittedAt=time.Now().UnixNano()
+		return true,nil
+	})
+	if err!=nil {t.Fatalf("commit deletion: %v",err)}
+	// Simulate a new Pod created after failure but with the same second-
+	// precision Kubernetes CreationTimestamp as the older surge Pod.
+	newPod:=testSwarmPod("new","new","web","ctr-new",second)
+	if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,newPod.DeepCopy(),metav1.CreateOptions{});err!=nil {
+		t.Fatalf("create new Pod: %v",err)
+	}
+	state,err=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{stale,newPod})
+	if err!=nil {t.Fatalf("assign replacement: %v",err)}
+	if slot:=state.slotForPodUID("new");slot==nil || slot.Slot!=1 {
+		t.Fatalf("new candidate did not inherit pending slot: %#v",state.Slots)
+	}
+	if slot:=state.slotForPodUID("surge");slot!=nil && slot.Slot==1 {
+		t.Fatalf("known preexisting surge stole replacement: %#v",state.Slots)
 	}
 }
