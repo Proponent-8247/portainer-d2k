@@ -117,3 +117,34 @@ This is the latest **functional/test source** as of R3; journal-only commits tha
 2. On red, diagnose concrete run logs and fix one conceptual defect per commit; never suppress tests merely to make CI green.
 3. Add regression for `HC-PRR-001` UID-precondition delete and `HC-PRR-005` crash-after-delete transaction, or preserve these as OPEN if continuing only current slot scope.
 4. Append R4 with exact new head and validation; keep previous checkpoints intact.
+
+## 2026-10-13 - Recovery checkpoint R4: HC-PRR-017 validated and closed
+
+Functional/test source pinned: `666c783c9ce256721d5f22e964ded29d27dec7d3`. No product source changes since that tested commit; intervening commits update investigation/journal/ledger only.
+
+### All release-relevant gates PASS on exact functional source
+- Focused regression GitHub Actions `38465636577` — **SUCCESS**.
+- Real Kind Kubernetes 1.35 controller acceptance `38465636594` — **SUCCESS**; includes 1->1 surge rollout, simultaneous replacement slots, 2->2 rollout, native EndpointSlice admission/withdrawal.
+- Complete Go + multiarch validation `38465636607` — **SUCCESS**, both jobs: repository gofmt, strict tidy, build, Go tests, vet, Go race and Buildx OCI `linux/amd64` + `linux/arm64`.
+- The previous formatter-only failure was fixed at `666c783c9ce256721d5f22e964ded29d27dec7d3`. Do not treat older red runs on other SHAs as current failures.
+
+### Finding ledger
+- `POST-REMEDIATION-REMEDIATION-HEALTHCHECK.md` closure commit `e301163fdc045e70bb078b481973e1158f6f7cb2`:
+  - **HC-PRR-017 FIXED** based on all three exact-SHA green runs above.
+  - **HC-PRR-002 IN PROGRESS**, deterministic Kubernetes slot pairing proven, *strict causal predecessor pairing not proven* because ReplicaSets lack such per-Pod lineage.
+  - Other **16 HC-PRR findings OPEN**. Overall health-check upstream submission is still **NOT READY**.
+- Remainder of original review remains frozen in `POST-REMEDIATION-REVIEW-HEALTHCHECK.md`. Do not rewrite those findings.
+
+### Native implementation / separate patches
+- `DOCKER-NATIVE-K8S-COMPATIBILITY.md` maps actual behavior and proposed native controllers.
+- Default is Deployment/ReplicaSet + native Service, EndpointSlice, readiness gate for stateless Docker apps. Native StatefulSet/per-slot controller is an opt-in *future implementation* needed for strict slot semantics.
+- This branch still uses synthetic flat Docker networks; Cilium per-network isolation is separate upstream work. Verify cross-patch integration in Talos before claiming network equivalence.
+- Global Swarm services are not yet DaemonSets. Do not claim parity.
+
+### Next action after recovery
+1. Verify latest branch HEAD and ledger count; read this R4 checkpoint.
+2. Begin **HC-PRR-001 / HC-PRR-005** as coordinated failure-injection/UID-fenced Kubernetes Pod deletion work, with specific regression and Kind tests before source fixes. These are lifecycle prerequisites for safe Docker-style self-healing.
+3. Next address Lease handoff `HC-PRR-003/004/007/016` and new-Service owner/ReplicaSet ancestry `HC-PRR-009`.
+4. Decide whether strict Swarm task identity (HC-PRR-002) needs a new optional native controller or a documented limited-support mode. Do not silently weaken the upstream target.
+5. Keep each conceptual fix isolated; preserve current source SHA, rerun strict exact-head validation, and append R5.
+6. Temporary test workflows and investigation docs must not be blindly included in upstream PR; extract a focused patch without rewriting the published working branch.
