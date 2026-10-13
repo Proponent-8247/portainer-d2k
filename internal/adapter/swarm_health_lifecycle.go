@@ -746,7 +746,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmHealthLifecycle(ctx context.Cont
 		if err != nil {
 			if deploymentHealthEnabled(deployment) {
 				for _, pod := range pods.Items {
-					_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthStateInvalid", err.Error())
+					_ = a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionFalse, "HealthStateInvalid", err.Error())
 				}
 			}
 			if firstErr == nil {
@@ -775,7 +775,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmDeploymentHealth(
 	if err != nil {
 		for _, pod := range pods {
 			if pod.Status.Phase == corev1.PodRunning {
-				_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthMetadataInvalid", err.Error())
+				_ = a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionFalse, "HealthMetadataInvalid", err.Error())
 			}
 		}
 		return err
@@ -819,7 +819,7 @@ func (a *KubernetesDockerAdapter) reconcileSwarmDeploymentHealth(
 		}
 		health := a.healthStateForPod(pod)
 		if healthStateIsUnhealthy(health) {
-			if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthUnhealthy", "Docker healthcheck is unhealthy"); err != nil {
+			if err := a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionFalse, "HealthUnhealthy", "Docker healthcheck is unhealthy"); err != nil {
 				continue
 			}
 			if slot.Pending == nil {
@@ -846,9 +846,9 @@ func (a *KubernetesDockerAdapter) reconcileSwarmDeploymentHealth(
 
 		if health != nil && health.Status == dockertypes.Healthy {
 			if slot.ActivationNotBefore > time.Now().UnixNano() {
-				_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "RestartDelay", "Swarm restart delay has not elapsed")
+				_ = a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionFalse, "RestartDelay", "Swarm restart delay has not elapsed")
 			} else {
-				_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionTrue, "HealthHealthy", "Docker healthcheck is healthy")
+				_ = a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionTrue, "HealthHealthy", "Docker healthcheck is healthy")
 				if slot.ActivationNotBefore != 0 {
 					_, _ = a.mutateSwarmHealthLifecycleState(ctx, deployment, func(current *swarmHealthLifecycleState) (bool, error) {
 						currentSlot := current.Slots[slotKey(slotNumber)]
@@ -956,13 +956,19 @@ func (a *KubernetesDockerAdapter) advancePendingSwarmReplacement(
 		return err
 	}
 	if pod, ok := podsByUID[pending.FailedPodUID]; ok {
-		if err := a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthUnhealthy", "Docker healthcheck is unhealthy"); err != nil {
+		if err := a.setPodHealthConditionForUID(ctx, pod.Name, pending.FailedPodUID, corev1.ConditionFalse, "HealthUnhealthy", "Docker healthcheck is unhealthy"); err != nil {
 			return err
 		}
 		if err := a.healthManagerLeaseOwned(ctx); err != nil {
 			return err
 		}
-		if err := a.client.CoreV1().Pods(a.namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		// The listed failed Pod may have been replaced under the same name.
+		// Let the Kubernetes API server reject deletion if its UID changed.
+		uid := k8stypes.UID(pending.FailedPodUID)
+		options := metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		}
+		if err := a.client.CoreV1().Pods(a.namespace).Delete(ctx, pod.Name, options); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}

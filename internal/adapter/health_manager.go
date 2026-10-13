@@ -228,7 +228,7 @@ func (a *KubernetesDockerAdapter) reconcileHealthMonitors(ctx context.Context) e
 			if _, policyErr := decodeSwarmHealthRestartPolicyStrict(deployment.Annotations[types.AnnotationSwarmRestartPolicy]); policyErr != nil {
 				for _, pod := range pods.Items {
 					if pod.Status.Phase == corev1.PodRunning {
-						_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthMetadataInvalid", policyErr.Error())
+						_ = a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionFalse, "HealthMetadataInvalid", policyErr.Error())
 					}
 				}
 				continue
@@ -238,7 +238,7 @@ func (a *KubernetesDockerAdapter) reconcileHealthMonitors(ctx context.Context) e
 			if lifecycleErr != nil {
 				for _, pod := range pods.Items {
 					if pod.Status.Phase == corev1.PodRunning {
-						_ = a.setPodHealthCondition(ctx, pod.Name, corev1.ConditionFalse, "HealthStateInvalid", lifecycleErr.Error())
+						_ = a.setPodHealthConditionForUID(ctx, pod.Name, string(pod.UID), corev1.ConditionFalse, "HealthStateInvalid", lifecycleErr.Error())
 					}
 				}
 				continue
@@ -706,7 +706,7 @@ func (a *KubernetesDockerAdapter) setPodHealthConditionForMonitor(
 	if !a.monitorOwns(spec, token) {
 		return context.Canceled
 	}
-	return a.setPodHealthCondition(ctx, spec.PodName, status, reason, message)
+	return a.setPodHealthConditionForUID(ctx, spec.PodName, spec.PodUID, status, reason, message)
 }
 
 func (a *KubernetesDockerAdapter) setPodHealthCondition(
@@ -716,10 +716,26 @@ func (a *KubernetesDockerAdapter) setPodHealthCondition(
 	reason string,
 	message string,
 ) error {
+	return a.setPodHealthConditionForUID(ctx, podName, "", status, reason, message)
+}
+
+// setPodHealthConditionForUID fences Pod status mutation against name reuse.
+// UpdateStatus carries the fetched ResourceVersion, so an intervening
+// replacement returns a conflict; retries re-check the expected UID.
+func (a *KubernetesDockerAdapter) setPodHealthConditionForUID(
+	ctx context.Context,
+	podName, expectedUID string,
+	status corev1.ConditionStatus,
+	reason string,
+	message string,
+) error {
 	for attempt := 0; attempt < 5; attempt++ {
 		pod, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			return err
+		}
+		if expectedUID != "" && string(pod.UID) != expectedUID {
+			return fmt.Errorf("health readiness update rejected for Pod %q: expected UID %q, got %q", podName, expectedUID, pod.UID)
 		}
 
 		now := metav1.Now()
