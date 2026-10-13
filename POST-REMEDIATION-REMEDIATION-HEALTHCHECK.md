@@ -9,17 +9,17 @@
 - Preserve frozen source/review history. No rebases or history rewrites.
 
 ## Status summary
-Open: **15** · In progress: **2** · Fixed: **1** · Accepted with documented limitation: **0**
+Open: **14** · In progress: **2** · Fixed: **2** · Accepted with documented limitation: **0**
 
-Of the 18 frozen findings, 15 remain OPEN, 2 are IN PROGRESS and 1 is FIXED with exact-SHA full Go/race/OCI and live Kubernetes controller proof. Source-level fixes are not promoted to FIXED solely on fake-client tests.
+Of the 18 frozen findings, 14 remain OPEN, 2 are IN PROGRESS and 2 are FIXED with exact-SHA full Go/race/OCI and live Kubernetes controller proof. Source-level fixes are not promoted to FIXED solely on fake-client tests.
 
 | ID | Severity | Status | Scope |
 |---|---|---|---|
-| HC-PRR-001 | HIGH | IN PROGRESS | UID-fenced destructive Pod status and delete; red run 38466415572, source 414f4a804ba36a28d1ec8403b8b1284d970f479e; exact-head full gates pending |
+| HC-PRR-001 | HIGH | FIXED | Kubernetes UID-fenced readiness/status and destructive Pod deletion; red 38466415572, exact-source green focused 38467235235, Kind 38467235234, full 38467235317 |
 | HC-PRR-002 | HIGH | IN PROGRESS | Concurrent replacement slot association and ambiguity |
 | HC-PRR-003 | HIGH | OPEN | Lease release race |
 | HC-PRR-004 | MEDIUM | OPEN | Lease loss fencing |
-| HC-PRR-005 | HIGH | OPEN | Crash after delete before durable commit |
+| HC-PRR-005 | HIGH | IN PROGRESS | Crash-after-delete transaction recovery; new real Kind expired-Lease takeover test at c07df0765c3db85f729c9a20161ef20f2862730e pending validation |
 | HC-PRR-006 | MEDIUM | OPEN | Documented exec timeout approximation |
 | HC-PRR-007 | HIGH | OPEN | Lease reacquisition / fail-process lifecycle |
 | HC-PRR-008 | HIGH | OPEN | Invalid health annotation fail closed |
@@ -136,6 +136,24 @@ StatefulSet/per-slot controller design rather than inventing a mapping.
 - **GREEN behavioral tests** on run `38466970659` at an intermediate head; full workflow itself failed only gofmt import ordering for the new test.
 - Format fix `93b1dee1f0b94a864e895483c0405f77b5a4a431`. **Pending:** exact-functional-head focused `38467235235`, live Kind `38467235234`, full Go/race/multiarch `38467235317`.
 - Do not mark HC-PRR-001 FIXED until final gates pass; native API preconditions are security-relevant and failure modes must remain fail-closed.
+
+## HC-PRR-001 closure — native Kubernetes UID fencing
+
+**Remediated functional SHA:** `93b1dee1f0b94a864e895483c0405f77b5a4a431` (product-code fix `414f4a804ba36a28d1ec8403b8b1284d970f479e`, followed by test formatting).
+**Result:** **FIXED**, after the following validations on the exact functional SHA:
+
+- **RED** `38466415572`: missing `DeleteOptions.Preconditions.UID` and same-name successor Pod health/status mutation were both reproducible.
+- **Focused regression tests** [38467235235](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38467235235) **SUCCESS**.
+- **Real Kind Kubernetes controller** [38467235234](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38467235234) **SUCCESS**.
+- **Strict gofmt/tidy/build/test/vet/race + amd64/arm64 OCI** [38467235317](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38467235317) **SUCCESS**.
+- Native API-server UID preconditions on deletes and UID-fenced, ResourceVersion-conflict-aware Pod status mutation implement the safety invariant without a duplicate application-side ownership lock.
+
+### HC-PRR-005 work started
+
+- Existing fake-client test covers uncommitted DeleteCommittedAt slot reservation.
+- New real ReplicaSet/Kind `TestLiveCrashAfterPodDeleteBeforeIntentCommitRecoversSlot` first added in `43ff793d73ba579aea89427fcf68f6485c59886a`; enhanced in `c07df0765c3db85f729c9a20161ef20f2862730e` to leave an abandoned, expired **native Lease** rather than calling graceful release.
+- The test validates new manager/Lease takeover, pending reservation before commit, durable deletion finalization and single replacement task/restart-history attribution.
+- **Validation pending**: Kind [38467703107](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38467703107), focused [38467703307](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38467703307), full [38467703411](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38467703411). Do not close until results and fault-injection coverage are reviewed.
 
 ## Mutation policy
 - One conceptual fix/commit where practical, plus independent ledger checkpoints.
