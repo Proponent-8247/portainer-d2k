@@ -472,3 +472,42 @@ func TestSwarmTaskListPrefersCurrentPodOverTerminatingFormerSlotOwner(t *testing
 		t.Fatalf("task list preferred terminating former slot owner: %#v", tasks)
 	}
 }
+
+func TestSwarmTaskListDoesNotAdvertiseSurgeReplicaAsNewDesiredSlot(t *testing.T) {
+	ctx := context.Background()
+	a := newHealthcheckTestAdapter()
+	dep := testSwarmDeployment("web", 1)
+	// Kubernetes reports one old plus one surge replica during start-first
+	// rollout. Swarm service desired count is still exactly one replica.
+	dep.Status.Replicas = 2
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, dep.DeepCopy(), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create Deployment: %v", err)
+	}
+	base := time.Now().Add(-time.Minute)
+	old := testSwarmPod("old", "old", "web", "ctr-old", base)
+	surge := testSwarmPod("surge", "surge", "web", "ctr-surge", base.Add(time.Second))
+	old.Labels[types.LabelSwarmSlot] = "1"
+	surge.Labels[types.LabelSwarmSlot] = "2"
+	for _, pod := range []corev1.Pod{old, surge} {
+		if _, err := a.client.CoreV1().Pods(a.namespace).Create(ctx, pod.DeepCopy(), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create rollout Pod: %v", err)
+		}
+	}
+	_, err := a.mutateSwarmHealthLifecycleState(ctx, dep, func(state *swarmHealthLifecycleState) (bool, error) {
+		first := state.ensureSlot(1)
+		first.CurrentPodUID = "old"
+		first.CurrentPodName = old.Name
+		first.CurrentTaskID = "old-task"
+		second := state.ensureSlot(2)
+		second.CurrentPodUID = "surge"
+		second.CurrentPodName = surge.Name
+		second.CurrentTaskID = "provisional-task"
+		return true, nil
+	})
+	if err != nil { t.Fatalf("persist slots: %v", err) }
+	tasks, err := a.SwarmListTasks(ctx, "web", "")
+	if err != nil { t.Fatalf("list tasks: %v", err) }
+	if len(tasks) != 1 || tasks[0]["Slot"] != 1 || tasks[0]["ID"] != "old-task" {
+		t.Fatalf("surge Pod was incorrectly advertised as desired Swarm slot 2: %#v", tasks)
+	}
+}
