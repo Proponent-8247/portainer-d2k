@@ -288,3 +288,41 @@ func TestConcurrentSameRevisionReplacementAssignmentDeterministic(t *testing.T) 
 		}
 	}
 }
+
+func TestReplacementCandidateAllowsKubernetesSecondPrecisionTimestamp(t *testing.T) {
+	ctx:=context.Background()
+	a:=newHealthcheckTestAdapter()
+	dep:=testSwarmDeployment("web",1)
+	base:=time.Now().Add(-time.Minute)
+	old:=testSwarmPod("old","old","web","ctr-old",base)
+	if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,old.DeepCopy(),metav1.CreateOptions{});err!=nil {
+		t.Fatalf("create old: %v",err)
+	}
+	if _,err:=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{old});err!=nil {
+		t.Fatalf("initial slot: %v",err)
+	}
+	// The API server may serialize CreationTimestamp only to whole seconds.
+	// The actual replacement can be created after a failure in that second.
+	second:=time.Now().Truncate(time.Second)
+	failure:=second.Add(500*time.Millisecond).UnixNano()
+	_,err:=a.mutateSwarmHealthLifecycleState(ctx,dep,func(state *swarmHealthLifecycleState)(bool,error){
+		state.Slots["1"].Pending=&swarmHealthReplacementIntent{
+			FailedPodUID:"old",FailedAt:failure,DeleteCommittedAt:failure,
+			ReplacementTaskID:"replacement-id",
+		}
+		return true,nil
+	})
+	if err!=nil {t.Fatalf("persist pending: %v",err)}
+	if err:=a.client.CoreV1().Pods(a.namespace).Delete(ctx,old.Name,metav1.DeleteOptions{});err!=nil {
+		t.Fatalf("delete old: %v",err)
+	}
+	candidate:=testSwarmPod("new","new","web","ctr-new",second)
+	if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,candidate.DeepCopy(),metav1.CreateOptions{});err!=nil {
+		t.Fatalf("create candidate: %v",err)
+	}
+	state,err:=a.ensureSwarmSlotAssignments(ctx,dep,[]corev1.Pod{candidate})
+	if err!=nil {t.Fatalf("assign candidate: %v",err)}
+	if slot:=state.slotForPodUID("new");slot==nil || slot.Slot!=1 {
+		t.Fatalf("second-precision CreationTimestamp stranded replacement: %#v",state.Slots)
+	}
+}
