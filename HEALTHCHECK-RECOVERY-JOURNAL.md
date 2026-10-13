@@ -58,3 +58,30 @@ Recovery HEAD before journal commit: `2bec586f6964d36e51284c6ec5c452a9cb9c4e36` 
 
 ### Next checkpoint
 After a formatter commit plus exact-head gate evidence, append R2 here and cross-link the remediation ledger; keep previous entries unchanged.
+
+## 2026-10-13 - Recovery checkpoint R2: desired slots and native EndpointSlice acceptance
+
+HEAD before this journal update: `16ddb557eb4775a6c49ef18b09c12e6eac94250d`.
+
+### New product implementation and regressions
+- `357d677f4d443b91163d1feb9291fdcb2e30436e`: formatting fix; focused slot regression run **38464467794** PASS.
+- Full-Go run **38464468167** found an additional `HC-PRR-017` defect: Swarm task readback used `max(Deployment.Status.Replicas, Deployment.Spec.Replicas)`; a temporary native `MaxSurge` Pod increased the number of **user-visible desired Swarm slots**.
+- `13af30ab3b8a60e6f29271a7c23c52719107179d`: fix task list to take the desired replica count from `Deployment.Spec.Replicas`, not temporary controller surge capacity. Focused slot run **38464726804** PASS; prior live Kind run **38464726716** PASS.
+- `8b6d536b4511565ea8ccb2cb4fa4e9e57d10ef6d`: add real-controller **2->2 rolling-update** test to cover the case missing from the original HC-PRR-017 acceptance.
+- `678d57d49bcc682e35698391b9f79810253b88f4`: add native ClusterIP/EndpointSlice readiness-gate admission/withdrawal test, including health recovery and failure.
+- `16ddb557eb4775a6c49ef18b09c12e6eac94250d`: correct Kind workflow selector to include all four live tests. Kind run **38465255625**, focused run **38465255624**, full Go/race/OCI run **38465255658** were queued/in progress at this journal checkpoint; do **not** report them as passed before completion.
+- `DOCKER-NATIVE-K8S-COMPATIBILITY.md` committed at `7bc712eecade143c9cec9899ff6d2de0eb3323d4`. Separates implemented Docker-to-native translations from unsupported/approximate ones, including global -> DaemonSet and stable per-slot identity -> optional StatefulSet/per-slot controller.
+
+### Discovered compatibility boundary
+- This healthcheck feature branch's `internal/adapter/network.go` still creates **synthetic Docker networks over flat Kubernetes namespace networking**. The hardened Cilium-based Docker-network-equivalent isolation work belongs to a **separate patch/PR**, to be integration-tested with health readiness/EndpointSlice gating later.
+- `deploy.mode: global` is still mapped to replicated=1 with a warning; a true DaemonSet adapter requires independent design/implementation. Do not claim native global support exists now.
+- Preserve native Deployment/ReplicaSet and K8s Service/EndpointSlice dataplanes for stateless replicated services; avoid inventing a second Docker overlay or scheduler.
+
+### Recovery instructions after R2
+1. Verify HEAD and inspect runs **38465255624 / 38465255625 / 38465255658** plus later exact-HEAD jobs.
+2. If `gofmt` fails, identify the exact file/lines, commit formatting narrowly, then rerun.
+3. If Kind 2->2 or EndpointSlice admission fails, fix test/semantic root cause (never weaken assertion merely for green).
+4. Confirm `go test -race ./...`, gofmt, strict tidy, build, vet and multiarch OCI all pass on a *functional* SHA; if documentation-only final commit changes HEAD, identify the validated functional ancestor.
+5. Update `POST-REMEDIATION-REMEDIATION-HEALTHCHECK.md` with exact evidence; HC-PRR-017 remains **IN PROGRESS** until live 1->1, 2->2 and full gates pass. HC-PRR-002 remains **IN PROGRESS** with explicit same-ReplicaSet causal-identity limitation.
+6. Keep native mapping documentation and do not conflate network-isolation patch into healthcheck upstream PR; do not silently migrate existing Deployments.
+
