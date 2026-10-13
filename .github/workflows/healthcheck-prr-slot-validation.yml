@@ -3,6 +3,14 @@ name: healthcheck-prr-slot-validation
 on:
   push:
     branches: [ "feature/docker-healthchecks-upstream" ]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'deploy/**'
+      - '.github/workflows/healthcheck-prr-*.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
