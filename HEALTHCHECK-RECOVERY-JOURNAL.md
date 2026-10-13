@@ -173,3 +173,26 @@ No branch history rewritten.
 3. For `HC-PRR-005`, run a **real ReplicaSet/controller** test simulating crash after successful Pod deletion and before persistent DeleteCommittedAt, then new d2k instance/Lease owner adopting replacement with the reserved task ID. Do not close using only fake clients.
 4. Pursue remaining UID/ownership and Lease handoff defects without changing intended Docker/Swarm behavior or merging the separate Cilium network patch.
 5. Append R6 after exact-head validation; preserve earlier journal entries and findings.
+
+## 2026-10-13 - Recovery checkpoint R6: UID-fenced deletion closed; abandoned-Lease crash test ongoing
+
+### HC-PRR-001 closed
+- Frozen source for UID fix: `93b1dee1f0b94a864e895483c0405f77b5a4a431`; atomic product fix `414f4a804ba36a28d1ec8403b8b1284d970f479e`.
+- **RED** targeted tests `38466415572`: no UID preconditions; same-name replacement Pod could be modified/deleted by stale failure intent.
+- **GREEN exact-source** targeted `38467235235`, Kind `38467235234`, full Go/race/multiarch `38467235317` (all successful).
+- Remediation ledger `POST-REMEDIATION-REMEDIATION-HEALTHCHECK.md` updated in `fc1f0bc0c7bb2bd648c337305232b59bcb09f51c`: **14 OPEN / 2 IN PROGRESS / 2 FIXED**. HC-PRR-001 and HC-PRR-017 FIXED; HC-PRR-002 and HC-PRR-005 IN PROGRESS.
+
+### HC-PRR-005 real-controller crash scenario
+- Added `TestLiveCrashAfterPodDeleteBeforeIntentCommitRecoversSlot` to `internal/adapter/swarm_slot_live_test.go` in `43ff793d73ba579aea89427fcf68f6485c59886a`.
+- Strengthened in `c07df0765c3db85f729c9a20161ef20f2862730e` to leave a Kubernetes Lease with the **old holder identity** and an expired RenewTime (simulated crash, not graceful release). The new d2k instance must acquire expired Lease, preserve the pending slot, commit old-Pod deletion and adopt the native ReplicaSet replacement with exactly one restart/task record.
+- Kind selector includes the new live test in `b1e6933bd4be47becb055f9107d2c1c865da4c1e`.
+- Functional-source HEAD for test validation: `c07df0765c3db85f729c9a20161ef20f2862730e`.
+- **R6 pending runs:** focused `38467703307`, Kind `38467703107`, full `38467703411`. Do not claim HC-PRR-005 FIXED until real-controller and full strict gates pass.
+
+### Resume and quality gates
+1. Verify branch HEAD, ledger and this newest R6 entry; source commits after `c07df...` must be examined and validated separately.
+2. Inspect three R6 jobs. On failure, differentiate actual native controller bug from test setup/formatting. Keep exact failure evidence; do not weaken kill-test.
+3. If Kind and full Go/race/OCI are green, close HC-PRR-005 with exact-source evidence; update journal R7.
+4. For remaining HIGH findings prioritize HC-PRR-003/004/007/016 Lease fencing/handoff, then HC-PRR-009 ownerReferences/Deployment UID and HC-PRR-013 invalid restart policy. Stay with Kubernetes-native controllers and API ownership rather than building a second scheduler.
+5. HC-PRR-002 remains incomplete for strict causal physical task identity; `DOCKER-NATIVE-K8S-COMPATIBILITY.md` and `HEALTHCHECK-SLOT-ARCHITECTURE.md` contain alternatives and migration warnings.
+6. Continue to exclude working audit docs/temporary CI workflows from a narrow upstream PR; never rewrite published history.
