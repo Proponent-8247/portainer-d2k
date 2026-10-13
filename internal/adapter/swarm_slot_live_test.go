@@ -575,10 +575,22 @@ func TestLiveCrashAfterPodDeleteBeforeIntentCommitRecoversSlot(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("delete failed Pod with Kubernetes UID precondition: %v", err)
 	}
-	a.releaseHealthManagerLease(ctx)
+	// A crashed process cannot call releaseHealthManagerLease. Expire the
+	// persisted Lease as the API server would observe after the timeout,
+	// while leaving the old holder identity/resource present for takeover.
+	lease, err := a.client.CoordinationV1().Leases(a.namespace).Get(ctx, healthManagerLeaseName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read crashed owner's Lease: %v", err)
+	}
+	expiredAt := metav1.NewMicroTime(time.Now().Add(-2 * healthManagerLeaseDuration))
+	lease.Spec.RenewTime = &expiredAt
+	if _, err := a.client.CoordinationV1().Leases(a.namespace).Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("expire abandoned manager Lease: %v", err)
+	}
 
 	// New process with the same Kubernetes data source and a different
-	// health-manager identity must reconcile the durable incomplete intent.
+	// health-manager identity must take over the expired native Lease,
+	// then reconcile the durable incomplete intent.
 	recovered := &KubernetesDockerAdapter{
 		client:        a.client,
 		namespace:     a.namespace,
