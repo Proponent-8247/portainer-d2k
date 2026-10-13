@@ -8,7 +8,10 @@ import (
 	dockertypes "github.com/docker/docker/api/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -423,5 +426,45 @@ func TestReplacementExcludesPreviouslyObservedSurgePodInSameSecond(t *testing.T)
 	}
 	if slot := state.slotForPodUID("surge"); slot != nil && slot.Slot == 1 {
 		t.Fatalf("known preexisting surge stole replacement: %#v", state.Slots)
+	}
+}
+
+func TestSwarmTaskListPrefersCurrentPodOverTerminatingFormerSlotOwner(t *testing.T) {
+	ctx:=context.Background()
+	a:=newHealthcheckTestAdapter()
+	dep:=testSwarmDeployment("web",1)
+	if _,err:=a.client.AppsV1().Deployments(a.namespace).Create(ctx,dep.DeepCopy(),metav1.CreateOptions{});err!=nil {
+		t.Fatalf("create Deployment: %v",err)
+	}
+	base:=time.Now().Add(-time.Minute)
+	old:=testSwarmPod("z-old","old","web","ctr-old",base)
+	current:=testSwarmPod("a-current","new","web","ctr-new",base.Add(time.Second))
+	old.Labels[types.LabelSwarmSlot]="1"
+	current.Labels[types.LabelSwarmSlot]="1"
+	deletedAt:=metav1.Now()
+	old.DeletionTimestamp=&deletedAt
+	for _,p:=range []corev1.Pod{old,current} {
+		if _,err:=a.client.CoreV1().Pods(a.namespace).Create(ctx,p.DeepCopy(),metav1.CreateOptions{});err!=nil {
+			t.Fatalf("create Pod: %v",err)
+		}
+	}
+	_,err:=a.mutateSwarmHealthLifecycleState(ctx,dep,func(state *swarmHealthLifecycleState)(bool,error){
+		s:=state.ensureSlot(1)
+		s.CurrentPodUID="new"
+		s.CurrentPodName=current.Name
+		s.CurrentContainerID="ctr-new"
+		s.CurrentTaskID="current-task"
+		return true,nil
+	})
+	if err!=nil {t.Fatalf("persist current slot: %v",err)}
+	// Kubernetes LIST order is not a selection policy. Return current first
+	// and terminating old last to expose the old last-write-wins bug.
+	a.client.(*fake.Clientset).Fake.PrependReactor("list","pods",func(action k8stesting.Action)(bool,runtime.Object,error){
+		return true,&corev1.PodList{Items:[]corev1.Pod{current,old}},nil
+	})
+	tasks,err:=a.SwarmListTasks(ctx,"web","")
+	if err!=nil {t.Fatalf("list tasks: %v",err)}
+	if len(tasks)!=1 || tasks[0]["ID"]!="current-task" {
+		t.Fatalf("task list preferred terminating former slot owner: %#v",tasks)
 	}
 }
