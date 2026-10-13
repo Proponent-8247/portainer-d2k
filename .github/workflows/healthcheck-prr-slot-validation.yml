@@ -31,6 +31,6 @@ jobs:
       - name: Validate Go formatting of slot changes
         run: |
           echo '--- GOFMT DIFF BEGIN ---'
-          gofmt -d internal/adapter/swarm_health_lifecycle.go internal/adapter/swarm_slot_reconciliation_test.go internal/adapter/swarm_slot_live_test.go
+          gofmt -d internal/adapter/swarm_health_lifecycle.go internal/adapter/swarm_slot_reconciliation_test.go internal/adapter/swarm_slot_live_test.go internal/adapter/swarm_health_uid_fencing_test.go
           echo '--- GOFMT DIFF END ---'
-          test -z "$(gofmt -l internal/adapter/swarm_health_lifecycle.go internal/adapter/swarm_slot_reconciliation_test.go internal/adapter/swarm_slot_live_test.go)"
+          test -z "$(gofmt -l internal/adapter/swarm_health_lifecycle.go internal/adapter/swarm_slot_reconciliation_test.go internal/adapter/swarm_slot_live_test.go internal/adapter/swarm_health_uid_fencing_test.go)"
