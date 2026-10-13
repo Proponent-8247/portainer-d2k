@@ -504,9 +504,13 @@ func TestSwarmTaskListDoesNotAdvertiseSurgeReplicaAsNewDesiredSlot(t *testing.T)
 		second.CurrentTaskID = "provisional-task"
 		return true, nil
 	})
-	if err != nil { t.Fatalf("persist slots: %v", err) }
+	if err != nil {
+		t.Fatalf("persist slots: %v", err)
+	}
 	tasks, err := a.SwarmListTasks(ctx, "web", "")
-	if err != nil { t.Fatalf("list tasks: %v", err) }
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
 	if len(tasks) != 1 || tasks[0]["Slot"] != 1 || tasks[0]["ID"] != "old-task" {
 		t.Fatalf("surge Pod was incorrectly advertised as desired Swarm slot 2: %#v", tasks)
 	}
