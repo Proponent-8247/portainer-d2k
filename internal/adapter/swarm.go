@@ -1359,8 +1359,15 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 			}
 		}
 
+		// During Deployment rollout a terminating predecessor can still
+		// carry the same Swarm slot label as its promoted successor. Task
+		// readback must not use Kubernetes LIST order (last Pod wins) or
+		// expose a terminating Pod as the currently running task.
 		podsBySlot := map[int32]corev1.Pod{}
 		for _, p := range pods.Items {
+			if p.DeletionTimestamp != nil {
+				continue
+			}
 			slot := parseSwarmSlotLabel(p)
 			if slot <= 0 && lifecycle != nil {
 				if current := lifecycle.slotForPodUID(string(p.UID)); current != nil {
@@ -1370,7 +1377,29 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 			if slot <= 0 {
 				continue
 			}
-			podsBySlot[int32(slot)] = p
+			key := int32(slot)
+			if prior, found := podsBySlot[key]; found {
+				// Prefer the UID durably assigned to the active slot. A
+				// stale Pod label cannot override the lifecycle ledger.
+				if lifecycle != nil {
+					if owner := lifecycle.Slots[slotKey(slot)]; owner != nil {
+						if owner.CurrentPodUID == string(prior.UID) {
+							continue
+						}
+						if owner.CurrentPodUID == string(p.UID) {
+							podsBySlot[key] = p
+							continue
+						}
+					}
+				}
+				// When no stored owner is visible, give duplicate labels
+				// a deterministic preference independent of LIST order.
+				if p.CreationTimestamp.Before(&prior.CreationTimestamp) ||
+					(p.CreationTimestamp.Equal(&prior.CreationTimestamp) && string(p.UID) < string(prior.UID)) {
+					continue
+				}
+			}
+			podsBySlot[key] = p
 		}
 
 		for slotNumber := int32(1); slotNumber <= desired; slotNumber++ {
