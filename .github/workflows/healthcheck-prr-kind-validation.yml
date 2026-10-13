@@ -1,8 +1,7 @@
 name: healthcheck-prr-kind-acceptance
 
 on:
-  push:
-    branches: [ "feature/docker-healthchecks-upstream" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
