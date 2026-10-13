@@ -42,4 +42,4 @@ jobs:
           D2K_LIVE_K8S: "1"
         run: |
           export KUBECONFIG="$HOME/.kube/config"
-          go test -tags livek8s ./internal/adapter -run '^TestLive(DeploymentSurgeSlotConvergesAfterRollingUpdate|ConcurrentReplacementSlotsRemainUnique|TwoReplicaRollingUpdatePreservesSwarmTasks|NativeServiceEndpointHealthGating)$' -v -count=1 -timeout 9m
+          go test -tags livek8s ./internal/adapter -run '^TestLive(DeploymentSurgeSlotConvergesAfterRollingUpdate|ConcurrentReplacementSlotsRemainUnique|TwoReplicaRollingUpdatePreservesSwarmTasks|NativeServiceEndpointHealthGating|CrashAfterPodDeleteBeforeIntentCommitRecoversSlot)$' -v -count=1 -timeout 9m
