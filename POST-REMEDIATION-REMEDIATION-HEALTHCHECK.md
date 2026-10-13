@@ -9,9 +9,9 @@
 - Preserve frozen source/review history. No rebases or history rewrites.
 
 ## Status summary
-Open: **16** · In progress: **2** · Fixed: **0** · Accepted with documented limitation: **0**
+Open: **16** · In progress: **1** · Fixed: **1** · Accepted with documented limitation: **0**
 
-The 18 frozen findings remain unresolved until evidence is complete: 16 OPEN and 2 IN PROGRESS. Source-level fixes may be implemented but are not promoted to FIXED solely on fake-client tests.
+Of the 18 frozen findings, 16 remain OPEN, 1 is IN PROGRESS and 1 is FIXED with exact-SHA full Go/race/OCI and live Kubernetes controller proof. Source-level fixes are not promoted to FIXED solely on fake-client tests.
 
 | ID | Severity | Status | Scope |
 |---|---|---|---|
@@ -31,7 +31,7 @@ The 18 frozen findings remain unresolved until evidence is complete: 16 OPEN and
 | HC-PRR-014 | HIGH | OPEN | Restart delay controls process start vs readiness |
 | HC-PRR-015 | MEDIUM | OPEN | Terminating task state |
 | HC-PRR-016 | MEDIUM | OPEN | Concurrent manager start |
-| HC-PRR-017 | HIGH | IN PROGRESS | Ordinary Deployment rolling-update surge slot drift |
+| HC-PRR-017 | HIGH | FIXED | Ordinary Deployment rolling-update surge slot drift; exact-source validation: 38465636577, 38465636594 and 38465636607 |
 | HC-PRR-018 | MEDIUM | OPEN | Crashloop target with healthy sidecar |
 
 ## Current investigation
@@ -104,6 +104,26 @@ StatefulSet/per-slot controller design rather than inventing a mapping.
 - `internal/adapter/swarm_slot_live_test.go`: opt-in `livek8s` real Deployment-controller rollout and concurrent two-slot replacement scenarios.
 - GitHub temporary workflows `healthcheck-prr-slot-validation.yml` and `healthcheck-prr-kind-validation.yml` are validation-only and must be removed before upstream submission.
 - **No finding closed based solely on source inspection or fake-client success.**
+
+## HC-PRR-017 remediation closure — independently reproducible evidence
+
+**Reviewed source baseline:** `96d3f9209ac48dacacb5dd8330e6d86129eb674c`.
+**Validated functional head:** `666c783c9ce256721d5f22e964ded29d27dec7d3`.
+**Result:** **FIXED** for the specific ordinary rolling-update slot-drift/task-readback defect; this does **not** close HC-PRR-002 or the overall 18-finding review.
+
+- Red source-target regressions: run `38450191087` reproduced desired-slot drift and replacement misattribution.
+- Repaired provisional surge-slot promotion, reserved pending replacement identity, timestamp rounding and pre-existing UID snapshots, with deterministic/revision-aware adoption.
+- Corrected `SwarmListTasks` to use desired `Deployment.Spec.Replicas`, never the transient `Status.Replicas` inflated by MaxSurge; filtered terminating Pods and favored the durable current slot UID for task readback.
+- **Focused Go regression matrix:** [run 38465636577](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38465636577) **PASS** on exact source.
+- **Real Kind Kubernetes 1.35 controllers:** [run 38465636594](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38465636594) **PASS** on exact source. Acceptance covers 1->1 start-first rolling update, two simultaneous replacement Pods, 2->2 rolling update and native Service EndpointSlice health admission/withdrawal.
+- **Strict full validation:** [run 38465636607](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38465636607) **PASS** on exact source: gofmt, strict go mod tidy diff, build, all Go tests, go vet, `go test -race ./...`, and `linux/amd64,linux/arm64` Buildx OCI local-context build.
+- Journal and native compatibility design remain separate working documents. Temporary validation workflows are not part of intended upstream submission.
+
+### HC-PRR-002 — partial acceptance, not closed
+
+- Simultaneous replacement tests pass with deterministic and unique **logical** slot assignments on a shared Deployment.
+- There is no Kubernetes ReplicaSet API metadata linking a newly generated Pod to a single causally corresponding failed Pod. It is therefore not possible to prove **strict physical predecessor->replacement slot identity** for two indistinguishable replacements using only existing ReplicaSet evidence.
+- Status stays **IN PROGRESS**. If strict physical slot identity is required for Docker/Swarm parity, design an explicit opt-in native StatefulSet or per-slot-controller backend, including upgrade/rollback and start-first compatibility gates. Do not silently claim these stronger guarantees from a sorted-Pod implementation.
 
 ## Mutation policy
 - One conceptual fix/commit where practical, plus independent ledger checkpoints.
