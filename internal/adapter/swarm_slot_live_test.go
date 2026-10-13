@@ -460,3 +460,69 @@ func TestLiveTwoReplicaRollingUpdatePreservesSwarmTasks(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveNativeServiceEndpointHealthGating(t *testing.T) {
+	a, deployment := liveSlotTestAdapter(t, 1)
+	ctx := context.Background()
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: a.namespace},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": deployment.Name},
+			Ports: []corev1.ServicePort{{
+				Name: "http",
+				Port: 80,
+				TargetPort: intstr.FromInt(80),
+			}},
+		},
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, service, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create native ClusterIP Service: %v", err)
+	}
+	var workload corev1.Pod
+	waitForLiveCondition(t, "Pod running with an unmet health gate", func() (bool, error) {
+		pods, err := livePods(ctx, a)
+		if err != nil {
+			return false, err
+		}
+		if len(pods) != 1 || pods[0].Status.Phase != corev1.PodRunning {
+			return false, nil
+		}
+		workload = pods[0]
+		return true, nil
+	})
+	endpointReady := func() (bool, bool, error) {
+		slices, err := a.client.DiscoveryV1().EndpointSlices(a.namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "kubernetes.io/service-name=web",
+		})
+		if err != nil {
+			return false, false, err
+		}
+		for _, slice := range slices.Items {
+			for _, endpoint := range slice.Endpoints {
+				if endpoint.TargetRef == nil || endpoint.TargetRef.UID != workload.UID {
+					continue
+				}
+				return true, endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready, nil
+			}
+		}
+		return false, false, nil
+	}
+	waitForLiveCondition(t, "initial native EndpointSlice not-ready state", func() (bool, error) {
+		_, ready, err := endpointReady()
+		return !ready, err
+	})
+	if err := a.setPodHealthCondition(ctx, workload.Name, corev1.ConditionTrue, "TestHealthy", "healthy"); err != nil {
+		t.Fatalf("set health readiness True: %v", err)
+	}
+	waitForLiveCondition(t, "native EndpointSlice admission after health success", func() (bool, error) {
+		found, ready, err := endpointReady()
+		return found && ready, err
+	})
+	if err := a.setPodHealthCondition(ctx, workload.Name, corev1.ConditionFalse, "TestUnhealthy", "unhealthy"); err != nil {
+		t.Fatalf("set health readiness False: %v", err)
+	}
+	waitForLiveCondition(t, "native EndpointSlice withdrawal after health failure", func() (bool, error) {
+		_, ready, err := endpointReady()
+		return !ready, err
+	})
+}
