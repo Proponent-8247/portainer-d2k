@@ -9,13 +9,13 @@
 - Preserve frozen source/review history. No rebases or history rewrites.
 
 ## Status summary
-Open: **16** · In progress: **1** · Fixed: **1** · Accepted with documented limitation: **0**
+Open: **15** · In progress: **2** · Fixed: **1** · Accepted with documented limitation: **0**
 
-Of the 18 frozen findings, 16 remain OPEN, 1 is IN PROGRESS and 1 is FIXED with exact-SHA full Go/race/OCI and live Kubernetes controller proof. Source-level fixes are not promoted to FIXED solely on fake-client tests.
+Of the 18 frozen findings, 15 remain OPEN, 2 are IN PROGRESS and 1 is FIXED with exact-SHA full Go/race/OCI and live Kubernetes controller proof. Source-level fixes are not promoted to FIXED solely on fake-client tests.
 
 | ID | Severity | Status | Scope |
 |---|---|---|---|
-| HC-PRR-001 | HIGH | OPEN | UID-fenced destructive Pod operations |
+| HC-PRR-001 | HIGH | IN PROGRESS | UID-fenced destructive Pod status and delete; red run 38466415572, source 414f4a804ba36a28d1ec8403b8b1284d970f479e; exact-head full gates pending |
 | HC-PRR-002 | HIGH | IN PROGRESS | Concurrent replacement slot association and ambiguity |
 | HC-PRR-003 | HIGH | OPEN | Lease release race |
 | HC-PRR-004 | MEDIUM | OPEN | Lease loss fencing |
@@ -124,6 +124,18 @@ StatefulSet/per-slot controller design rather than inventing a mapping.
 - Simultaneous replacement tests pass with deterministic and unique **logical** slot assignments on a shared Deployment.
 - There is no Kubernetes ReplicaSet API metadata linking a newly generated Pod to a single causally corresponding failed Pod. It is therefore not possible to prove **strict physical predecessor->replacement slot identity** for two indistinguishable replacements using only existing ReplicaSet evidence.
 - Status stays **IN PROGRESS**. If strict physical slot identity is required for Docker/Swarm parity, design an explicit opt-in native StatefulSet or per-slot-controller backend, including upgrade/rollback and start-first compatibility gates. Do not silently claim these stronger guarantees from a sorted-Pod implementation.
+
+## HC-PRR-001 — red/green UID-fencing remediation in progress
+
+- Regression source: `internal/adapter/swarm_health_uid_fencing_test.go`, created at `5d00fef08ee3259e5f380202ded4cb6b427d9e25`. Test 1 asserts `DeleteOptions.Preconditions.UID` equals the failed Pod UID; test 2 replaces a Pod with another UID under the same name and checks a stale health intent neither changes successor readiness nor deletes it/consumes restart attempts.
+- **RED** focused CI [38466415572](https://github.com/Proponent-8247/portainer-d2k/actions/runs/38466415572), head `86034c20f69489f8df43f6c47c7f08571466d8ee`: both UID race tests failed, original slot tests passed.
+- **Product fix** single atomic commit `414f4a804ba36a28d1ec8403b8b1284d970f479e`:
+  - UID-aware Pod status mutation with conflict retry and identity verification;
+  - monitoring/Swarm reconciler paths pass observed Pod UID to fenced helper;
+  - destructive Pods.Delete uses native Kubernetes `DeleteOptions.Preconditions.UID` from durable failed-task identity.
+- **GREEN behavioral tests** on run `38466970659` at an intermediate head; full workflow itself failed only gofmt import ordering for the new test.
+- Format fix `93b1dee1f0b94a864e895483c0405f77b5a4a431`. **Pending:** exact-functional-head focused `38467235235`, live Kind `38467235234`, full Go/race/multiarch `38467235317`.
+- Do not mark HC-PRR-001 FIXED until final gates pass; native API preconditions are security-relevant and failure modes must remain fail-closed.
 
 ## Mutation policy
 - One conceptual fix/commit where practical, plus independent ledger checkpoints.
