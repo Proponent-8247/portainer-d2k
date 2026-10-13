@@ -9,10 +9,9 @@
 - Preserve frozen source/review history. No rebases or history rewrites.
 
 ## Status summary
-Open: **18** · In progress: **2** · Fixed: **0** · Accepted with documented limitation: **0**
+Open: **16** · In progress: **2** · Fixed: **0** · Accepted with documented limitation: **0**
 
-The 18 frozen findings remain open pending behavioral evidence. Counts above represent
-18 total OPEN-or-IN-PROGRESS findings, not 20 independent findings.
+The 18 frozen findings remain unresolved until evidence is complete: 16 OPEN and 2 IN PROGRESS. Source-level fixes may be implemented but are not promoted to FIXED solely on fake-client tests.
 
 | ID | Severity | Status | Scope |
 |---|---|---|---|
@@ -75,7 +74,7 @@ StatefulSet/per-slot controller design rather than inventing a mapping.
 
 ## Acceptance / kill tests
 - 1-replica Deployment, `maxSurge=1,maxUnavailable=0`: old Pod slot 1,
-  new surge Pod appears while old lives; no durable slot 2; old terminates;
+  new surge Pod appears while old lives; any slot 2 is provisional, not permanent; old terminates;
   new Pod inherits slot 1 and task listing remains real, not synthetic.
 - N-replica Deployment, overlapping rolling update and scale-up/down.
 - Two simultaneous unhealthy slots, old Pods deleted and two new Pods arrive
@@ -90,8 +89,21 @@ StatefulSet/per-slot controller design rather than inventing a mapping.
 ## Timeline
 - **STARTED** source recovery/current branch verification and immutable snapshot checks.
 - **STARTED** HC-PRR-017/002 root-cause and architectural alternatives.
-- **PENDING** write red tests and implement focused allocator guard.
-- **PENDING** validation and lifecycle regression/fault injection.
+- **COMPLETED** Red-test run `38450191087` reproduced the rollout slot drift, uncommitted-delete slot leak, and preexisting-surge theft.
+- **COMPLETED** Allocator guard/promotion/reservation commit `e6300038fff18c21bfd3c19bb6c6d1f8d086639c`; focused test run `38450538839` green.
+- **COMPLETED** Additional revision-aware, stable tie-break and same-second Pod UIDs tests; run `38451414502` green.
+- **COMPLETED** Time-precision/known-failure-time Pod snapshot commit `b9a1fcb51bf6b763993436202dae940e834310f8`; run `38451202073` green.
+- **COMPLETED** Kind real-controller run `38452483770` proved rolling-update surge and promotion but exposed a task-readback defect: a terminating former slot owner can override the active Pod in `SwarmListTasks` (HC-PRR-015 interaction). New focused test reproduces that bug, and product fix is committed as `7d8c659fce8faba9e8b6eb3434b5b4809c24b55a`.
+- **IN PROGRESS** Real-controller repeat: both one-replica rolling-update and two simultaneous replacement-Pod tests in disposable Kind; not yet green on final code.
+- **IN PROGRESS** Full gofmt/tidy/build/test/vet/race/OCI exact-head gates and supplemental controller fault injection.
+- **BLOCKED ON PROOF** HC-PRR-002 cannot claim exact physical slot causality for two indistinguishable Pod replacements under a single ReplicaSet; architecture tradeoff is documented in `HEALTHCHECK-SLOT-ARCHITECTURE.md`.
+
+### New regression / validation evidence
+
+- `internal/adapter/swarm_slot_reconciliation_test.go`: ordinary surge promotion, pending reservation before delete commit, preexisting surge exclusion, cross-revision concurrent replacement, deterministic same-revision assignment, Kubernetes CreationTimestamp precision, failure-time UID snapshot, and current-vs-terminating task readback.
+- `internal/adapter/swarm_slot_live_test.go`: opt-in `livek8s` real Deployment-controller rollout and concurrent two-slot replacement scenarios.
+- GitHub temporary workflows `healthcheck-prr-slot-validation.yml` and `healthcheck-prr-kind-validation.yml` are validation-only and must be removed before upstream submission.
+- **No finding closed based solely on source inspection or fake-client success.**
 
 ## Mutation policy
 - One conceptual fix/commit where practical, plus independent ledger checkpoints.
