@@ -51,20 +51,20 @@ type swarmHealthSlotState struct {
 }
 
 type swarmHealthReplacementIntent struct {
-	FailedPodUID      string                   `json:"failedPodUID"`
-	FailedPodName     string                   `json:"failedPodName"`
-	FailedTaskID      string                   `json:"failedTaskID"`
-	FailedContainerID string                   `json:"failedContainerID,omitempty"`
-	FailedReplicaSetUID string                 `json:"failedReplicaSetUID,omitempty"`
-	KnownPodUIDs []string `json:"knownPodUIDs,omitempty"`
-	FailedNodeName    string                   `json:"failedNodeName,omitempty"`
-	FailedAt          int64                    `json:"failedAt"`
-	DeleteCommittedAt int64                    `json:"deleteCommittedAt,omitempty"`
-	NotBefore         int64                    `json:"notBefore,omitempty"`
-	Error             string                   `json:"error,omitempty"`
-	ReplacementTaskID string                   `json:"replacementTaskID"`
-	Policy            swarmHealthRestartPolicy `json:"policy"`
-	Task              swarmHealthTaskRecord    `json:"task"`
+	FailedPodUID        string                   `json:"failedPodUID"`
+	FailedPodName       string                   `json:"failedPodName"`
+	FailedTaskID        string                   `json:"failedTaskID"`
+	FailedContainerID   string                   `json:"failedContainerID,omitempty"`
+	FailedReplicaSetUID string                   `json:"failedReplicaSetUID,omitempty"`
+	KnownPodUIDs        []string                 `json:"knownPodUIDs,omitempty"`
+	FailedNodeName      string                   `json:"failedNodeName,omitempty"`
+	FailedAt            int64                    `json:"failedAt"`
+	DeleteCommittedAt   int64                    `json:"deleteCommittedAt,omitempty"`
+	NotBefore           int64                    `json:"notBefore,omitempty"`
+	Error               string                   `json:"error,omitempty"`
+	ReplacementTaskID   string                   `json:"replacementTaskID"`
+	Policy              swarmHealthRestartPolicy `json:"policy"`
+	Task                swarmHealthTaskRecord    `json:"task"`
 }
 
 type swarmHealthTaskRecord struct {
@@ -916,18 +916,18 @@ func (a *KubernetesDockerAdapter) beginSwarmHealthReplacement(
 		}
 		replacementTaskID := swarmReplacementTaskID(record.ID, now)
 		slot.Pending = &swarmHealthReplacementIntent{
-			FailedPodUID:      string(pod.UID),
-			FailedPodName:     pod.Name,
-			FailedTaskID:      record.ID,
-			FailedContainerID: slot.CurrentContainerID,
+			FailedPodUID:        string(pod.UID),
+			FailedPodName:       pod.Name,
+			FailedTaskID:        record.ID,
+			FailedContainerID:   slot.CurrentContainerID,
 			FailedReplicaSetUID: podReplicaSetOwnerUID(pod),
-			KnownPodUIDs: knownUIDs,
-			FailedNodeName:    pod.Spec.NodeName,
-			FailedAt:          now.UnixNano(),
-			Error:             "container unhealthy",
-			ReplacementTaskID: replacementTaskID,
-			Policy:            policy,
-			Task:              record,
+			KnownPodUIDs:        knownUIDs,
+			FailedNodeName:      pod.Spec.NodeName,
+			FailedAt:            now.UnixNano(),
+			Error:               "container unhealthy",
+			ReplacementTaskID:   replacementTaskID,
+			Policy:              policy,
+			Task:                record,
 		}
 		created = true
 		_ = health
